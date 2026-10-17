@@ -1,0 +1,8 @@
+{
+  "id": "droid-native",
+  "name": "Droid Native PoC",
+  "media": [],
+  "requirements": {
+    "paseo": ">=0.11.4"
+  }
+}

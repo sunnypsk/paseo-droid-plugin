@@ -1,0 +1,34 @@
+{
+  "name": "droid-native",
+  "private": true,
+  "version": "0.2.4",
+  "type": "module",
+  "files": [
+    "paseo-plugin.json",
+    "OVERVIEW.md",
+    "icon.svg",
+    "index.client.ts",
+    "index.client.tsx",
+    "index.server.ts",
+    "index.server.tsx",
+    "client/",
+    "server/",
+    "shared/"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --test server/*.test.ts"
+  },
+  "devDependencies": {
+    "@getpaseo/client": "0.11.4",
+    "@getpaseo/plugin": "0.11.4",
+    "@types/node": "22.18.6",
+    "react": "19.1.0",
+    "tsx": "4.20.6",
+    "typescript": "5.9.3",
+    "zod": "^4.4.3"
+  },
+  "dependencies": {
+    "@factory/droid-sdk": "0.9.1"
+  }
+}
