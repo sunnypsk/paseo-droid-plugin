@@ -14,6 +14,8 @@
 
 Model selector 顯示 Droid 即時回報嘅 multiplier，對話 context meter 顯示 estimated 使用量同 model 上限。Paseo Usage 顯示 Factory Standard／Core quota 同 Extra Usage 餘額；quota 只讀現有 CLI login，支援 macOS Keychain 同 encrypted file store，唔會 refresh token 或更改帳戶設定。
 
+Quota 查詢會將現有 access token 同適用嘅 organization header 傳往 Factory 官方 `api.factory.ai` 或 `api.eu.factory.ai` 嘅 `/api/billing/limits`；唔會傳 refresh token，Usage report 同 account input 亦唔包含 credentials。呢個 endpoint 係 Droid native internal API，CLI／服務更新後需重新驗證。
+
 每次真正建立或重新開啟 session 前都會刷新 model list 同 multiplier。重疊嘅相同查詢會合併，唔保留永久 catalog cache；啟動會多一次 discovery 等待，失敗時可重試。建立前嘅 draft picker 仍由 Paseo host cache 決定，session ready 後會用最新清單。
 
 呢個係 PoC，暫時未實作匯入其他既有 Droid 對話或 Mission mode。SDK 嘅 advanced plan actions 會限制為本插件已處理嘅選項。Auto high 會直接使用 Droid 對應嘅 autonomy level；預設 Ask mode 會等待授權。

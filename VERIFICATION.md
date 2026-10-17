@@ -13,6 +13,14 @@
 - Script compatibility tests 使用 installed SDK `DroidClient` 同真實 Permissions handler，覆蓋 native protocol／option presentation fields、完整 review、明確 Once／Cancel、原有 frames 原樣通過、未知格式拒絕、duplicate IDs、interrupt／close 同 late response。
 - 0.2.3 新增 multiplier validity、context 與 per-turn counters snapshot 合併、model 切換失敗唔沿用舊容量、stats timeout／close 隔離、startup late subscriber、quota window 缺失／過期、USD conversion、credential rotation／nullable metadata／env scope／error redaction tests。
 
+## Public Git 發布準備
+
+- Manifest 加入鎖定嘅 production dependency 安裝步驟：`npm ci --omit=dev --ignore-scripts`。喺只複製 tracked source 嘅乾淨目錄成功安裝，並驗證 SDK 嘅 `createSession`／`resumeSession`／`listModels` exports；無建立 model turn 或呼叫 login。
+- 發布設定更新後，typecheck 同全部 109 個 tests 再次通過。
+- Gitleaks 8.30.1 掃描發布前嘅完整 Git history 同準備公開嘅 source，未發現 secrets。另檢查 tracked paths 同 lockfile，確認無 credentials／environment／private-key 檔案，419 個 dependency entries 均有版本、官方 npm resolved URL 同 SHA-512 integrity，URL 無內嵌認證。
+- `.test-output/`、`node_modules/`、本機 environment、Factory／Paseo 設定同常見 credential／key files 已設為 Git ignored。測試使用合成 credentials，唔包含實際 login；原始實測輸出保留喺本機 `.test-output/`，無包含喺公開 source。
+- 呢啲係本機發布前檢查，唔代表 Paseo registry 已完成 review 或批准上架。
+
 ## 真實 Droid／Paseo
 
 - Plugin `droid-native` 本機安裝成功，狀態 `running`，provider `available`。

@@ -2,9 +2,21 @@
 
 獨立 Paseo provider plugin，透過 `@factory/droid-sdk` 同本機 Droid CLI 嘅 `stream-jsonrpc` 接駁。
 
-## 本機使用
+## 安裝
 
 需要 Node.js 22、Paseo 0.11.4+，以及已登入嘅 Droid 0.244.0+。本次驗證使用 SDK 0.9.1；插件版本係 0.2.4。
+
+由 GitHub 安裝：
+
+```sh
+paseo plugin add git:sunnypsk/paseo-droid-plugin
+```
+
+Paseo 會用已提交嘅 lockfile 安裝 production dependencies，唔會執行 dependency lifecycle scripts。Droid CLI 需要另外安裝並登入；插件唔會自動下載 Droid。
+
+本 repository 係社群 PoC；公開 GitHub source 唔代表已獲 Paseo 官方 registry 批准。
+
+如果要喺本機開發：
 
 ```sh
 npm ci
@@ -67,6 +79,8 @@ Model 名稱會顯示 Droid 即時 catalog 嘅 `tokenMultiplier`，例如本次�
 Paseo Usage 嘅 **Factory** card 顯示 Standard 同 Core 各個 quota window 嘅已用／剩餘百分比、reset 時間，以及 Extra Usage USD 餘額。API 冇提供套餐總 token allowance，插件唔會推算。Window 名稱沿用 API 嘅 fiveHour／weekly／monthly，唔由倒數時間推斷週期。Paseo 會 cache 五分鐘，可喺 Usage 手動 refresh。
 
 Quota 沿用 Droid 0.244.0 `/limits` 嘅 read-only billing endpoint；呢個係 native internal API，唔係 SDK 公開方法，CLI／服務升級後需重新驗證。插件只讀取目前 login 嘅 access token，支援 macOS Keychain 同 Factory encrypted file store；唔會 refresh token、改寫 credentials、改套餐或 Extra Usage 設定。過期／無權限／缺失資料會明確顯示問題。
+
+Quota request 只會將現有 access token 同適用嘅 organization header 傳往 Factory 官方 `api.factory.ai` 或 `api.eu.factory.ai` 嘅 `/api/billing/limits`。唔會傳 refresh token，亦唔會將 credentials 寫入 repository、Usage report 或 account input。Prompts、附件同工具內容仍會按目前 Droid／Factory 同 MCP 設定傳送，唔代表全部資料只留喺本機。
 
 帳戶 quota 喺側欄嘅全域 Usage 查看；對話右下角 context meter 顯示該 model 嘅 context。Paseo 0.11.4 generic plugin provider 未有 `usageSession()` bridge，所以對話 popover 暫時唔會再顯示 Factory 帳戶 card，呢個唔影響全域 Usage 或 context meter。Source 已有按 session launch environment 篩選 login 嘅實作，但現版本 host 未會呼叫佢。
 

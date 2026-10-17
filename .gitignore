@@ -2,3 +2,22 @@ node_modules/
 .test-output/
 *.log
 .DS_Store
+
+# Local credentials and agent configuration
+.env
+.env.*
+!.env.example
+!.env.*.example
+.npmrc
+.netrc
+.git-credentials
+.factory/
+.paseo/
+.aws/
+auth.v2.*
+credentials.json
+credentials.*.json
+*.pem
+*.key
+*.p12
+*.pfx
