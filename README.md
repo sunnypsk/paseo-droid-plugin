@@ -64,6 +64,12 @@ For a pending tool or plan approval, the plugin asks you to resolve it first and
 
 Invalid attachments, models without image support, and rejected native acknowledgements produce errors without triggering Paseo's replacement fallback. A closed connection or acknowledgement timeout can still end native work. The plugin does not automatically restart the model loop.
 
+The development source now records a sent steering row only after Droid acknowledges it. An explicit rejection leaves no sent row; an uncertain acknowledgment is recorded as a warning instead. Ordinary rejected settings preserve the session for retry. A timed-out settings update closes and invalidates that session, because its eventual native result is uncertain. Session mode choices follow Droid's organization policy when it reports allowed autonomy levels.
+
+Tool cards retain bounded input and output previews for Script and MCP calls, with credential and encoded-data fields redacted. Successful TodoWrite calls update Paseo Tasks; failed or interrupted calls do not claim task progress. Text deltas are batched for up to 50 ms or 4,096 characters and flushed before tool events and turn completion. Unchanged persistence rows reuse immutable snapshots instead of being serialized again. Persistence still retains the full conversation and its payload grows with history.
+
+Native retraction clears the plugin's saved text and adds a withdrawal warning. Paseo 0.11.4 cannot remove already rendered native text through its public provider API, so this is a mitigation, not a complete visual retraction fix. See [the host limitation and upstream acceptance scenarios](docs/PASEO_RETRACTION.md).
+
 Use Paseo's attachment controls to add files. Images, PDFs, and UTF-8 text use Droid's native image/document inputs. ZIP, Office, and other binary files provide a filename, type, size, and validated local path so Droid can choose tools to handle them; these references do not imply that their contents have been decoded. Paseo text context, issue/PR context, and code-review context are also mapped to Droid inputs. Timeline snapshots store attachment markers instead of duplicating base64 data or full documents.
 
 Paseo 0.11.4 shows attachment previews when a message is sent. After an agent reload, reconstructed user rows show text without the original thumbnails or document cards. Droid's native context retains the attachments; this plugin does not implement the host's attachment-history rendering.

@@ -1,128 +1,73 @@
 import type { DroidMessage, FactoryDroidMessage } from "@factory/droid-sdk";
-import type {
-  ProviderTimelineItem,
-  ProviderToolCallDetail,
-} from "@getpaseo/plugin/server/provider";
+import type { ProviderTimelineItem } from "@getpaseo/plugin/server/provider";
+import { detailForTool, toolResultText, previewToolText, todoUpdateForTool } from "./tool-presentation";
 
 type ToolItem = Extract<ProviderTimelineItem, { type: "tool_call" }>;
 type TextItem = Extract<ProviderTimelineItem, { type: "assistant_message" | "reasoning" }>;
 type ToolState = { input: Record<string, unknown>; item: ToolItem; output?: string };
-
-// These are presentation limits, not limits on what reaches the native agent.
-const MAX_TOOL_TEXT = 64_000;
-
-function preview(text: string): string {
-  return text.length <= MAX_TOOL_TEXT
-    ? text
-    : `${text.slice(0, MAX_TOOL_TEXT)}\n[Output truncated in Paseo]`;
-}
-
-function object(value: unknown): Record<string, unknown> | undefined {
-  return value !== null && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : undefined;
-}
-
-function string(input: Record<string, unknown>, ...keys: string[]): string | undefined {
-  for (const key of keys) if (typeof input[key] === "string") return input[key] as string;
-  return undefined;
-}
-
-function number(input: Record<string, unknown>, key: string): number | undefined {
-  const value = input[key];
-  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
-}
-
-// Never stringify arbitrary native payloads: they may include credentials,
-// thought signatures, base64 images, or transport metadata.
-function resultText(content: unknown): string {
-  if (typeof content === "string") return preview(content);
-  if (!Array.isArray(content)) return "";
-  return preview(
-    content
-      .map((part: unknown) => {
-        if (typeof part === "string") return part;
-        const block = object(part);
-        return block?.type === "text" && typeof block.text === "string" ? block.text : "";
-      })
-      .filter(Boolean)
-      .join("\n"),
-  );
-}
-
-function toolDetail(
-  name: string,
-  input: Record<string, unknown>,
-  output?: string,
-): ProviderToolCallDetail {
-  const kind = name.toLowerCase().split(/[.:/]/).at(-1)?.replace(/[^a-z]/g, "") ?? "";
-  const filePath = string(input, "file_path", "filePath", "path");
-  if (["execute", "shell", "bash", "execcommand", "executecommand"].includes(kind)) {
-    return {
-      type: "shell",
-      command: string(input, "command", "cmd") ?? "",
-      cwd: string(input, "cwd", "workdir"),
-      output,
-    };
-  }
-  if (["read", "readfile"].includes(kind) && filePath) {
-    return {
-      type: "read",
-      filePath,
-      content: output,
-      offset: number(input, "offset"),
-      limit: number(input, "limit"),
-    };
-  }
-  if (["edit", "editfile", "strreplace"].includes(kind) && filePath) {
-    return {
-      type: "edit",
-      filePath,
-      oldString: string(input, "old_str", "old_string", "oldString"),
-      newString: string(input, "new_str", "new_string", "newString"),
-    };
-  }
-  if (["create", "write", "writefile", "createfile"].includes(kind) && filePath) {
-    const content = string(input, "content", "contents");
-    return { type: "write", filePath, content: content === undefined ? undefined : preview(content) };
-  }
-  if (["grep", "glob", "search", "websearch"].includes(kind)) {
-    return {
-      type: "search",
-      query: string(input, "pattern", "query", "search_term") ?? "",
-      toolName: kind === "websearch" ? "web_search" : kind === "grep" ? "grep" : kind === "glob" ? "glob" : "search",
-      content: output,
-    };
-  }
-  if (["fetchurl", "webfetch", "fetch"].includes(kind)) {
-    return { type: "fetch", url: string(input, "url") ?? "", result: output };
-  }
-  if (["task", "subagent"].includes(kind)) {
-    return {
-      type: "sub_agent",
-      subAgentType: string(input, "subagent_type", "subagentType"),
-      description: string(input, "description"),
-      log: output ?? "",
-    };
-  }
-  return { type: "plain_text", label: name, text: output, icon: "wrench" };
-}
 
 /** Converts native events to complete snapshots, using stable native identities. */
 export class DroidTimeline {
   private readonly text = new Map<string, TextItem>();
   private readonly tools = new Map<string, ToolState>();
   private readonly fingerprints = new Map<string, string>();
+  private readonly publishedText = new Map<string, string>();
+  private readonly pendingText = new Map<string, { messageId: string; blockIndex: number; type: TextItem["type"]; chunks: string[]; length: number }>();
+  private pendingCharacters = 0;
+  private readonly retractionNotices = new Set<string>();
+
+  get hasPendingText(): boolean { return this.pendingText.size > 0; }
+
+  /** Join native deltas once per presentation batch, rather than once per token. */
+  flush(): ProviderTimelineItem[] {
+    const items: ProviderTimelineItem[] = [];
+    for (const [id, pending] of this.pendingText) {
+      const text = (this.text.get(id)?.text ?? "") + pending.chunks.join("");
+      items.push(this.setText(pending.messageId, pending.blockIndex, pending.type, text));
+    }
+    this.pendingText.clear();
+    this.pendingCharacters = 0;
+    return this.changed(items);
+  }
+
+  /** Completed snapshots live in provider persistence; do not retain a second history. */
+  release(): void {
+    this.pendingText.clear();
+    this.pendingCharacters = 0;
+    this.text.clear();
+    this.tools.clear();
+    this.fingerprints.clear();
+    this.publishedText.clear();
+    this.retractionNotices.clear();
+  }
 
   handle(event: DroidMessage): ProviderTimelineItem[] {
+    // A withdrawal must discard buffered text before it can become visible.
+    if (event.type === "assistant_message_retracted") {
+      for (const [id, pending] of this.pendingText) if (pending.messageId === event.messageId) {
+        if (!this.text.has(id)) this.setText(pending.messageId, pending.blockIndex, pending.type, "");
+        this.pendingCharacters -= pending.length;
+        this.pendingText.delete(id);
+      }
+    }
+    const prefix = event.type === "assistant_text_delta" || event.type === "thinking_text_delta" ? [] : this.flush();
     let items: ProviderTimelineItem[] = [];
     switch (event.type) {
       case "assistant_text_delta":
       case "thinking_text_delta": {
         const type = event.type === "assistant_text_delta" ? "assistant_message" : "reasoning";
         const id = this.textId(event.messageId, event.blockIndex, type);
-        const text = (this.text.get(id)?.text ?? "") + event.text;
-        items = [this.setText(event.messageId, event.blockIndex, type, text)];
+        if (!event.text) break;
+        let pending = this.pendingText.get(id);
+        if (!pending) {
+          pending = { messageId: event.messageId, blockIndex: event.blockIndex, type, chunks: [], length: 0 };
+          this.pendingText.set(id, pending);
+        }
+        pending.chunks.push(event.text);
+        pending.length += event.text.length;
+        this.pendingCharacters += event.text.length;
+        // Also bound a synchronous burst whose microtasks could delay timers.
+        if (this.pendingCharacters >= 4096) return this.flush();
         break;
       }
       case "assistant":
@@ -136,16 +81,24 @@ export class DroidTimeline {
         // user messages can still carry results from tools.
         items = this.message(event.message, false);
         break;
-      case "assistant_message_retracted":
+      case "assistant_message_retracted": {
+        let found = false;
         for (const item of this.text.values()) {
           const prefix = `droid:${item.type}:${event.messageId}:`;
           if (item.id.startsWith(prefix)) {
+            found = true;
             const empty = { ...item, text: "" };
             this.text.set(item.id, empty);
             items.push(empty);
           }
         }
+        if (found && !this.retractionNotices.has(event.messageId)) {
+          this.retractionNotices.add(event.messageId);
+          items.push({ type: "notification", id: `droid:retracted:${event.messageId}`, level: "warning",
+            message: "Droid withdrew an earlier response. Treat that response as invalid. This Paseo version may still display the withdrawn text." });
+        }
         break;
+      }
       case "tool_call":
         items = [this.tool(event.toolUseId, event.name, event.input)];
         break;
@@ -153,7 +106,7 @@ export class DroidTimeline {
         items = [this.tool(event.toolUse.id, event.toolUse.name, event.toolUse.input)];
         break;
       case "tool_result":
-        items = [this.toolResult(event.toolUseId, event.toolName, event.content, event.isError)];
+        items = this.toolResultItems(event.toolUseId, event.toolName, event.content, event.isError);
         break;
       case "tool_progress": {
         const previous = this.tools.get(event.toolUseId);
@@ -162,8 +115,8 @@ export class DroidTimeline {
         const state = this.tools.get(event.toolUseId)!;
         // fullOutput is a snapshot; other progress strings describe the latest
         // update and must not be blindly concatenated as output chunks.
-        state.output = preview(event.update.fullOutput ?? event.content);
-        state.item = { ...state.item, detail: toolDetail(state.item.name, state.input, state.output) };
+        state.output = previewToolText(event.update.fullOutput ?? event.content);
+        state.item = { ...state.item, detail: detailForTool(state.item.name, state.input, state.output) };
         items = [state.item];
         break;
       }
@@ -175,7 +128,7 @@ export class DroidTimeline {
       default:
         break;
     }
-    return this.changed(items);
+    return [...prefix, ...this.changed(items)];
   }
 
   /** Optional native history can use the exact same row identities as streaming. */
@@ -185,6 +138,7 @@ export class DroidTimeline {
 
   /** Ensure an interrupted or failed turn leaves no permanently running tools. */
   finishTools(status: "completed" | "failed" | "canceled"): ProviderTimelineItem[] {
+    const prefix = this.flush();
     const items: ProviderTimelineItem[] = [];
     for (const state of this.tools.values()) {
       if (state.item.status !== "running") continue;
@@ -193,7 +147,7 @@ export class DroidTimeline {
         : { ...state.item, status, error: null };
       items.push(state.item);
     }
-    return this.changed(items);
+    return [...prefix, ...this.changed(items)];
   }
 
   private message(message: FactoryDroidMessage, replay: boolean): ProviderTimelineItem[] {
@@ -214,7 +168,7 @@ export class DroidTimeline {
       else if (block.type === "tool_use")
         items.push(this.tool(block.id, block.name, block.input));
       else if (block.type === "tool_result")
-        items.push(this.toolResult(block.toolUseId, "", block.content, block.isError ?? false));
+        items.push(...this.toolResultItems(block.toolUseId, "", block.content, block.isError ?? false));
     });
     return items;
   }
@@ -241,17 +195,24 @@ export class DroidTimeline {
       id: `droid:tool:${id}`,
       callId: id,
       name: name || previous?.item.name || "Droid tool",
-      detail: toolDetail(name || previous?.item.name || "Droid tool", merged, previous?.output),
+      detail: detailForTool(name || previous?.item.name || "Droid tool", merged, previous?.output),
     };
     this.tools.set(id, { input: merged, item, output: previous?.output });
     return item;
   }
 
+  private toolResultItems(id: string, name: string, content: unknown, failed: boolean): ProviderTimelineItem[] {
+    const result = this.toolResult(id, name, content, failed);
+    const state = this.tools.get(id)!;
+    const todo = todoUpdateForTool(state.item.name, state.input, !failed);
+    return todo ? [result, todo] : [result];
+  }
+
   private toolResult(id: string, name: string, content: unknown, failed: boolean): ToolItem {
     this.tool(id, name, this.tools.get(id)?.input ?? {});
     const state = this.tools.get(id)!;
-    state.output = resultText(content);
-    const detail = toolDetail(state.item.name, state.input, state.output);
+    state.output = toolResultText(content);
+    const detail = detailForTool(state.item.name, state.input, state.output);
     state.item = failed
       ? { ...state.item, detail, status: "failed", error: state.output || "Droid tool failed" }
       : { ...state.item, detail, status: "completed", error: null };
@@ -260,6 +221,11 @@ export class DroidTimeline {
 
   private changed(items: ProviderTimelineItem[]): ProviderTimelineItem[] {
     return items.filter((item) => {
+      if (item.type === "assistant_message" || item.type === "reasoning") {
+        if (this.publishedText.get(item.id) === item.text) return false;
+        this.publishedText.set(item.id, item.text);
+        return true;
+      }
       const fingerprint = JSON.stringify(item);
       if (this.fingerprints.get(item.id) === fingerprint) return false;
       this.fingerprints.set(item.id, fingerprint);

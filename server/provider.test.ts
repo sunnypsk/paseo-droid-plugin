@@ -28,7 +28,7 @@ import {
 } from "@getpaseo/plugin/server/provider";
 import { createDroidProvider, supported, type DroidDependencies } from "./provider";
 import { preparePrompt, type PreparedPrompt } from "./attachments";
-import type { SteeringOptions } from "./steering";
+import { SteeringRejectedError, type SteeringOptions } from "./steering";
 
 const cwd = "/tmp/droid-provider-tests";
 const nativeId = "68c0cb90-4209-49e2-a7e7-f1d4fc1e49fb";
@@ -141,6 +141,7 @@ interface SetupOptions {
   noImageSupport?: boolean;
   context?: (native: FakeNative) => Promise<GetContextStatsResult>;
   contextTimeoutMs?: number;
+  settingsTimeoutMs?: number;
   usageReplayDelaysMs?: readonly number[];
   catalog?: (call: number, env: Readonly<Record<string, string>>, cwd?: string) => Promise<ModelInfo[]>;
 }
@@ -206,6 +207,7 @@ async function setup(script: Script = successful, gates: SetupOptions = {}) {
     },
     ...(gates.prepare ? { preparePrompt: gates.prepare } : {}),
     ...(gates.contextTimeoutMs === undefined ? {} : { contextTimeoutMs: gates.contextTimeoutMs }),
+    ...(gates.settingsTimeoutMs === undefined ? {} : { settingsTimeoutMs: gates.settingsTimeoutMs }),
     ...(gates.usageReplayDelaysMs ? { usageReplayDelaysMs: gates.usageReplayDelaysMs } : {}),
   } as unknown as DroidDependencies;
   const connection = await createDroidProvider(deps).connect({
@@ -1105,14 +1107,19 @@ test("a rejected steering update retains the pending AskUser even when clearing 
     const question = await h.waitFor("session.permission", (event) => event.request.kind === "question");
     await h.sendPrompt("failed-clearing-steer", [{ type: "text", text: "Supersede the question" }], "steer", "session", true);
     await h.steerStarted.promise;
-    ack.reject(new Error("Droid rejected the steering update"));
-    await h.rejectedSteer("failed-clearing-steer", /Droid rejected the steering update/);
+    assert.equal(h.events.filter((event) => event.type === "timeline.item" && event.item.type === "user_message" && event.item.clientMessageId === "failed-clearing-steer").length, 0,
+      "An update awaiting acknowledgment is not a sent user row");
+    ack.reject(new SteeringRejectedError(-32602));
+    await h.rejectedSteer("failed-clearing-steer", /Droid rejected steering/);
     assert.equal(turn.answers.length, 0);
     assert.equal(h.events.filter((event) => event.type === "session.permission_resolved").length, 0);
     assert.equal(h.terminalTurns().length, 0);
     await h.connection.send({ type: "session.permission", sessionId: "session", permissionId: question.request.id,
       response: { behavior: "allow", updatedInput: { answers: { Direction: "Review" } } } });
     await h.waitFor("session.turn", (event) => event.state === "completed");
+    const saved = await h.waitFor("session.persistence");
+    assert.ok(!JSON.stringify(saved.persistence).includes("Supersede the question"), "A definitively rejected message must not be persisted as delivered or uncertain");
+    assert.equal(h.events.filter((event) => event.type === "timeline.item" && event.item.type === "user_message" && event.item.clientMessageId === "failed-clearing-steer").length, 0);
     assert.equal(turn.answers[0]?.answers[0]?.answer, "Review", "The original card must remain answerable after steering fails");
     assert.notEqual(turn.answers[0]?.cancelled, true);
     assert.equal(h.events.filter((event) => event.type === "session.prompt_result" && event.clientMessageId === "failed-clearing-steer").length, 0);
@@ -1331,4 +1338,137 @@ test("session close remains independent of an awaiting steering acceptance promi
     await h.rejectedSteer("steer-before-close", /turn ended/);
     assert.equal(h.natives[0].streamCalls, 1);
   } finally { ack.resolve(); turn.release.resolve(); await h.cleanup(); }
+});
+
+test("rejected settings preserve the connection for another prompt and a corrected setting", async () => {
+  const h = await setup();
+  try {
+    await h.open();
+    const native = h.natives[0];
+    const update = native.updateSettings.bind(native);
+    let rejectNext = true;
+    native.updateSettings = async (changes) => {
+      if (rejectNext) { rejectNext = false; throw new Error("Model setting rejected"); }
+      await update(changes);
+    };
+    await h.connection.send({ type: "session.configure", requestId: "rejected-setting", sessionId: "session", changes: { model: "disabled-model" } });
+    await h.waitFor("request.failed", (event) => event.requestId === "rejected-setting");
+    assert.equal(h.transports.at(-1)?.isConnected, true);
+    assert.equal(h.transports.at(-1)?.closeCalls, 0);
+    assert.equal(h.events.filter((event) => event.type === "session.runtime_failed").length, 0);
+    await h.prompt("after-rejected-setting");
+    await h.waitFor("session.turn", (event) => event.state === "completed");
+    await h.connection.send({ type: "session.configure", requestId: "corrected-setting", sessionId: "session", changes: { mode: "auto-low" } });
+    await h.waitFor("request.completed", (event) => event.requestId === "corrected-setting");
+    assert.equal(native.settings.autonomyLevel, AutonomyLevel.Low);
+    assert.equal(native.streamCalls, 1);
+    assert.equal(h.transports.at(-1)?.isConnected, true);
+  } finally { await h.cleanup(); }
+});
+
+test("an uncertain steering ACK is persisted as a warning rather than a sent message", async () => {
+  const turn = heldTurn();
+  const h = await setup(turn.script, { steer: async () => { throw new Error("Acknowledgment unavailable"); } });
+  try {
+    await h.open();
+    await h.prompt();
+    await turn.started.promise;
+    await h.sendPrompt("uncertain-steer", [{ type: "text", text: "Potentially delivered requirement" }], "steer");
+    await h.rejectedSteer("uncertain-steer", /Acknowledgment unavailable/);
+    const notice = h.events.find((event) => event.type === "timeline.item" && event.item.type === "notification" && event.item.id === "paseo:steer-unconfirmed:uncertain-steer");
+    assert.ok(notice);
+    assert.equal(h.events.filter((event) => event.type === "timeline.item" && event.item.type === "user_message" && event.item.clientMessageId === "uncertain-steer").length, 0);
+    const saved = await h.waitFor("session.persistence");
+    assert.match(JSON.stringify(saved.persistence), /Delivery is unconfirmed/);
+    assert.equal(h.natives[0].interruptCalls, 0);
+  } finally { turn.release.resolve(); await h.cleanup(); }
+});
+
+test("a quiet stream flushes buffered text while active and ends with one final snapshot", async () => {
+  const gate = deferred<void>();
+  const h = await setup(async function* () {
+    yield { type: "assistant_text_delta", messageId: "quiet", blockIndex: 0, text: "Visible before completion" } as DroidMessage;
+    await gate.promise;
+    yield { type: "assistant_text_delta", messageId: "quiet", blockIndex: 0, text: "; final tail" } as DroidMessage;
+    yield result();
+  });
+  try {
+    await h.open();
+    await h.prompt();
+    const streamed = await h.waitFor("timeline.item", (event) => event.item.type === "assistant_message");
+    assert.equal((streamed.item as { text: string }).text, "Visible before completion");
+    assert.equal(h.terminalTurns().length, 0);
+    gate.resolve();
+    const saved = await h.waitFor("session.persistence");
+    const items = (saved.persistence.data as { items: Array<{ type: string; text?: string }> }).items;
+    assert.equal(items.find((item) => item.type === "assistant_message")?.text, "Visible before completion; final tail");
+    const terminal = await h.waitFor("session.turn", (event) => event.state === "completed");
+    assert.ok(h.events.indexOf(saved) < h.events.indexOf(terminal), "Persist the complete snapshot before the host captures a terminal session handle");
+  } finally { gate.resolve(); await h.cleanup(); }
+});
+
+test("closing a buffered stream cancels its presentation timer", async () => {
+  const started = deferred<void>();
+  const h = await setup(async function* (native) {
+    yield { type: "assistant_text_delta", messageId: "close-buffer", blockIndex: 0, text: "Pending text" } as DroidMessage;
+    started.resolve();
+    await new Promise<void>((resolve) => native.onShutdown.add(resolve));
+    yield result(false);
+  });
+  try {
+    await h.open();
+    await h.prompt();
+    await started.promise;
+    await h.connection.send({ type: "session.close", requestId: "close-buffer", sessionId: "session" });
+    await h.waitFor("request.completed", (event) => event.requestId === "close-buffer");
+    const after = h.events.length;
+    await new Promise<void>((resolve) => setTimeout(resolve, 70));
+    assert.equal(h.events.slice(after).filter((event) => event.type === "timeline.item").length, 0);
+  } finally { await h.cleanup(); }
+});
+
+test("a timed-out settings update invalidates the closed session instead of accepting more work", async () => {
+  const pending = deferred<void>();
+  const h = await setup(successful, { settingsTimeoutMs: 10 });
+  try {
+    await h.open();
+    h.natives[0].updateSettings = async () => pending.promise;
+    await h.connection.send({ type: "session.configure", requestId: "stalled-settings", sessionId: "session", changes: { mode: "auto-low" } });
+    await h.waitFor("session.runtime_failed");
+    await h.waitFor("request.failed", (event) => event.requestId === "stalled-settings");
+    assert.equal(h.transports.at(-1)?.isConnected, false);
+    await h.prompt("after-settings-timeout");
+    const rejected = await h.waitFor("session.prompt_result", (event) => event.clientMessageId === "after-settings-timeout");
+    assert.equal(rejected.result.type, "failed");
+    assert.equal(h.natives[0].streamCalls, 0);
+  } finally { pending.resolve(); await h.cleanup(); }
+});
+
+test("withdrawn text is cleared in persistence and is not republished on provider restore", async () => {
+  const gate = deferred<void>();
+  const withdrawn = "withdrawn-private-answer-sentinel";
+  const h = await setup(async function* () {
+    yield { type: "assistant_text_delta", messageId: "withdrawn-answer", blockIndex: 0, text: withdrawn } as DroidMessage;
+    await gate.promise;
+    yield { type: "assistant_message_retracted", messageId: "withdrawn-answer" } as DroidMessage;
+    yield result();
+  });
+  try {
+    await h.open();
+    await h.prompt();
+    await h.waitFor("timeline.item", (event) => event.item.type === "assistant_message" && event.item.text === withdrawn);
+    gate.resolve();
+    const saved = await h.waitFor("session.persistence");
+    assert.equal(JSON.stringify(saved.persistence).includes(withdrawn), false);
+    const notice = h.events.find((event) => event.type === "timeline.item" && event.item.type === "notification" && event.item.id === "droid:retracted:withdrawn-answer");
+    assert.ok(notice, "Warn explicitly because Paseo 0.11.4 ignores empty text snapshots");
+    await h.connection.send({ type: "session.close", requestId: "close-withdrawn", sessionId: "session" });
+    await h.waitFor("request.completed", (event) => event.requestId === "close-withdrawn");
+    const after = h.events.length;
+    await h.open("restored-withdrawn", saved.persistence);
+    const replay = h.events.slice(after).filter((event) => event.type === "timeline.item");
+    assert.equal(JSON.stringify(replay).includes(withdrawn), false);
+    assert.ok(replay.some((event) => event.type === "timeline.item" && event.item.type === "assistant_message" && event.item.text === ""));
+    assert.equal(h.natives[1].streamCalls, 0);
+  } finally { gate.resolve(); await h.cleanup(); }
 });

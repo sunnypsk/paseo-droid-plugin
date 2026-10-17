@@ -25,6 +25,12 @@ export function modeSettings(mode = "ask") {
   };
 }
 
+/** Honor the session's organization policy; older CLI versions omit this list. */
+export function sessionModes(settings: Pick<DroidSession["settings"], "availableAutonomyLevels">) {
+  const levels = settings.availableAutonomyLevels;
+  return levels === undefined ? modes : modes.filter((entry) => levels.includes(modeSettings(entry.id).autonomyLevel));
+}
+
 export function reasoning(value?: string): ReasoningEffort | undefined {
   if (value === undefined) return undefined;
   if (!Object.values(ReasoningEffort).includes(value as ReasoningEffort))
@@ -54,7 +60,7 @@ export function presentCatalog(models: ModelInfo[]): ProviderCatalog {
   };
 }
 
-export function configState(native: DroidSession, catalog: ProviderCatalog): ProviderConfigState {
+export function configState(native: Pick<DroidSession, "settings">, catalog: ProviderCatalog): ProviderConfigState {
   const settings = native.settings;
   const mode = settings.interactionMode === DroidInteractionMode.Spec ? "spec"
     : settings.autonomyLevel === AutonomyLevel.Off ? "ask" : `auto-${settings.autonomyLevel}`;
@@ -64,7 +70,7 @@ export function configState(native: DroidSession, catalog: ProviderCatalog): Pro
     mode,
     thinkingOption: settings.reasoningEffort,
     models: catalog.models,
-    modes,
+    modes: sessionModes(settings),
     thinkingOptions: model?.thinkingOptions ?? [],
     settings: [],
   };

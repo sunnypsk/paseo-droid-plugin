@@ -14,6 +14,14 @@ export interface SteeringOptions extends Pick<MessageOptions, "images" | "files"
   timeoutMs?: number;
 }
 
+/** A native error response establishes rejection, unlike a missing ACK. */
+export class SteeringRejectedError extends Error {
+  constructor(readonly code: number) {
+    super(`Droid rejected steering (code ${code}).`);
+    this.name = "SteeringRejectedError";
+  }
+}
+
 export interface DroidSteeringTransport {
   transport: StringFramedDroidClientTransport;
   /** Inject at the next model-turn boundary, within the current agent loop. */
@@ -107,7 +115,7 @@ export function createSteeringTransport(base: StringFramedDroidClientTransport):
       const id = envelope.id;
       const parsed = AddUserMessageResponseSchema.safeParse(envelope);
       if (!parsed.success) settle(id, new Error("Droid returned an invalid steering acknowledgment."));
-      else if (parsed.data.error) settle(id, new Error(`Droid rejected steering (code ${parsed.data.error.code}).`));
+      else if (parsed.data.error) settle(id, new SteeringRejectedError(parsed.data.error.code));
       else settle(id);
       return;
     }

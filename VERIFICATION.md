@@ -129,6 +129,18 @@ After full access was enabled, Computer Use actions and screenshots remained on 
 - Typecheck and all 109 tests passed. A scan of all 29 tracked files found no remaining CJK copy, and every existing inline code reference in the translated documents was retained.
 - This is a documentation and source-presentation update. Earlier CLI, model, MCP, and Desktop feature results above were not rerun for this release.
 
+## Unreleased timeline and reliability fixes, 2026-10-18
+
+- Generic Script and MCP cards now include bounded, sanitized input and output. Successful TodoWrite results publish one stable Paseo Tasks row, including pending, in-progress, completed, and empty-list updates. Failed calls and forced tool completion do not claim task progress.
+- Ordinary rejected settings and local validation failures preserve the native connection. Session autonomy choices honor Droid's reported organization policy. Only a settings deadline closes the transport and invalidates the slot, with a runtime failure for the host.
+- Sent steering rows are created after native acknowledgment. Explicit native errors do not create a delivered row; uncertain receipt produces a warning without triggering the host's replacement-turn fallback.
+- Text deltas are joined in batches of up to 50 ms or 4,096 characters, and flushed before non-text events and terminal processing. Text deduplication no longer serializes each full snapshot. Completed-turn reducer state is released; persistence caches immutable JSON rows and serializes only changed rows. Full history is retained, so persistence transfer size still grows with the conversation.
+- Final snapshots are persisted after native generator cleanup and before the terminal event, allowing the host to capture the current persistence handle before accepting the next turn.
+- Retraction drops pending matching text, emits cleared snapshots, and adds one stable withdrawal warning. This does not remove text already rendered by Paseo 0.11.4. [Host limitation and upstream scenarios](docs/PASEO_RETRACTION.md) document the remaining blocker.
+- Verification uses fake transports and controlled native events only. No installed plugin reload, daemon restart, live Droid model turn, or operation on an existing agent was performed. Actual Desktop rendering and live latency remain unverified for these changes.
+- `npm run typecheck`, all 143 automated tests, and `git diff --check` passed. A deterministic 10,000-delta test preserves all 200,000 characters with fewer than 60 presentation updates. The provider-level restore test confirms withdrawn text is absent from saved and replayed plugin snapshots.
+- An offline replay of the user-designated native session read its existing log without connecting to Paseo or Droid: 267 tool calls produced 56 Script cards containing input previews and six distinct TodoWrite updates (one repeated state was deduplicated). Its final Tasks list contained five completed items. No task content was modified.
+
 ## Verification boundaries and known limitations
 
 Paseo 0.11.4 preserves attachment previews in live user rows, but reconstructed rows after agent reload retain only text. Droid retains the native attachments. Host attachment-history rendering is not implemented by this plugin.
@@ -137,7 +149,7 @@ Pending tool/plan approvals still require an explicit decision. Droid exposes no
 
 The old host fallback was inspected in installed `app.asar`: `node_modules/@getpaseo/server/dist/server/server/agent/plugin-provider.js:923` mapped a nonmatching steer to unavailable, and `agent-manager.js:1835`/`:1908` performed replacement. Version 0.2.2 uses rejected acceptance and was verified through a real plugin subprocess in the UI. Host code was unchanged.
 
-Native retraction has source inspection only, without a complete live model retry/retraction UI check. The host drops empty text snapshots, so clearing previously displayed text after native retraction is not guaranteed.
+Native retraction has deterministic reducer and replay coverage, without a live model retry/retraction UI check. The host drops empty text snapshots, so previously displayed text cannot be cleared by this plugin on Paseo 0.11.4. The unreleased implementation warns explicitly and clears plugin persistence; canonical host output can still include the old text until upstream supports text replacement.
 
 An independent Chrome client at `app.paseo.sh` timed out connecting directly to the local daemon. Daemon web UI settings were unchanged and the daemon was not restarted. Visual evidence is limited to the existing macOS Desktop dark appearance. Compact/mobile layouts, physical devices, daemon restart, long conversations, and Mission mode were not verified. ZIP/Office local references have automated coverage without a real model decoding check.
 

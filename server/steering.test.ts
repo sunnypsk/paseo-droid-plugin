@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { DocumentSourceSchema, FACTORY_PROTOCOL_VERSION, type StringFramedDroidClientTransport } from "@factory/droid-sdk/node";
-import { createSteeringTransport } from "./steering";
+import { createSteeringTransport, SteeringRejectedError } from "./steering";
 
 function fake() {
   let message: ((frame: string) => void) | undefined;
@@ -74,7 +74,7 @@ test("native steering rejection preserves the SDK channel and sanitizes the erro
   const bridge = createSteeringTransport(f.base);
   const pending = bridge.steer("Update");
   f.reply(JSON.parse(f.sent[0]).id, { error: { code: -32602, message: "private-error-sentinel" } });
-  await assert.rejects(pending, (error: Error) => /-32602/.test(error.message) && !error.message.includes("private-error-sentinel"));
+  await assert.rejects(pending, (error: Error) => error instanceof SteeringRejectedError && error.code === -32602 && !error.message.includes("private-error-sentinel"));
   assert.equal(bridge.transport.isConnected, true);
   await bridge.transport.close();
 });
