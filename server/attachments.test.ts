@@ -27,7 +27,7 @@ test("mixed content retains ordered references and sends binary/documents throug
   const u = await uploads();
   try {
     const doc = await u.file("brief.pdf", "application/pdf", pdf);
-    const code = await u.file("main.ts", "application/octet-stream", "export const greeting = '你好';\n");
+    const code = await u.file("main.ts", "application/octet-stream", "export const greeting = '\u4f60\u597d';\n");
     const prepared = await preparePrompt(message(
       { type: "text", text: "First compare the image" }, image(),
       { type: "text", text: "then the PDF" }, doc,
@@ -40,7 +40,7 @@ test("mixed content retains ordered references and sends binary/documents throug
     assert.deepEqual(prepared.options.images, [{ type: "base64", mediaType: "image/png", data: png.toString("base64") }]);
     assert.deepEqual(prepared.options.files, [
       { type: "base64", mediaType: "application/pdf", data: pdf.toString("base64"), name: "brief.pdf" },
-      { type: "text", mediaType: "text/plain", data: "export const greeting = '你好';\n", name: "main.ts" },
+      { type: "text", mediaType: "text/plain", data: "export const greeting = '\u4f60\u597d';\n", name: "main.ts" },
     ]);
     assert.doesNotMatch(prepared.timelineText, /iVBOR|JVBER|export const/);
     assert.equal(prepared.timelineText, prepared.text);
@@ -75,10 +75,10 @@ test("uploaded images, PDFs, Unicode text and relative paths are read as bounded
   const u = await uploads();
   try {
     const picture = await u.file("diagram.png", "image/png", png);
-    const markdown = await u.file("readme.md", "text/markdown; charset=utf-8", "# 說明\nCantonese text\n");
+    const markdown = await u.file("readme.md", "text/markdown; charset=utf-8", "# \u8aaa\u660e\nCantonese text\n");
     const prepared = await preparePrompt(message(picture, { ...markdown, path: "readme.md" }), { cwd: u.directory });
     assert.equal(prepared.options.images?.[0].data, png.toString("base64"));
-    assert.equal(prepared.options.files?.[0].data, "# 說明\nCantonese text\n");
+    assert.equal(prepared.options.files?.[0].data, "# \u8aaa\u660e\nCantonese text\n");
     assert.match(prepared.timelineText, /diagram\.png/);
     assert.match(prepared.timelineText, /readme\.md/);
     assert.doesNotMatch(prepared.timelineText, /Cantonese text/);

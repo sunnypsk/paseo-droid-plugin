@@ -1,138 +1,146 @@
-# Droid Native 驗證記錄
+# Droid Native verification record
 
-日期：2026-10-17。環境：macOS、本機 Desktop-managed Paseo 0.11.4、Droid 0.244.0、Factory SDK 0.9.1。
+Initial validation: 2026-10-17. Environment: macOS, local Desktop-managed Paseo 0.11.4, Droid 0.244.0, and Factory SDK 0.9.1. Later release checks are dated separately below.
 
-## 自動化
+## Automated checks
 
-- `npm run typecheck` 通過。
-- `npm test`：109／109 通過（0.2.4）。
-- 包括 permission／AskUser、exact MCP preapproval、stream terminal 去重、concurrent prompt、interrupt、close-during-init、catalog cleanup、persistence replay、transport framing／shutdown。
-- Provider fake-native tests 會以 Paseo `ProviderEventSchema` 驗證全部 emitted events。
-- 新增 native steering request／ACK multiplex、attachments forwarding、同一 turn ID、ordered steering、late ACK、stop-during-attachment-read、unsupported-image model、格式／大小／路徑檢查。
-- Plan UI fields、完整 batch approval、AskUser supersede、pending tool admission、attachment preparation／ACK 期間新出現 approval，以及跨 turn ACK race 均有 regression tests。
-- Script compatibility tests 使用 installed SDK `DroidClient` 同真實 Permissions handler，覆蓋 native protocol／option presentation fields、完整 review、明確 Once／Cancel、原有 frames 原樣通過、未知格式拒絕、duplicate IDs、interrupt／close 同 late response。
-- 0.2.3 新增 multiplier validity、context 與 per-turn counters snapshot 合併、model 切換失敗唔沿用舊容量、stats timeout／close 隔離、startup late subscriber、quota window 缺失／過期、USD conversion、credential rotation／nullable metadata／env scope／error redaction tests。
+- `npm run typecheck` passed.
+- `npm test`: 109/109 passed for 0.2.4.
+- Coverage includes permissions and AskUser, exact MCP preapproval, stream terminal-event deduplication, concurrent prompts, interrupt, close during initialization, catalog cleanup, persistence replay, transport framing, and shutdown.
+- Provider tests use a fake native session and validate every emitted event with Paseo's `ProviderEventSchema`.
+- Steering and attachment coverage includes native request/ACK multiplexing, forwarding, stable turn IDs, ordered steering, late ACKs, Stop during attachment reads, models without image support, and format/size/path validation.
+- Regressions cover plan UI fields, complete batch approvals, AskUser supersession, admission during pending tool approval, new approvals during attachment preparation or ACK waiting, and ACK races across turns.
+- Script compatibility tests use the installed SDK's `DroidClient` and the actual permission handler. They cover protocol and option presentation fields, complete review content, explicit Once/Cancel decisions, unchanged forwarding of supported frames, rejection of unknown shapes, duplicate IDs, interrupt/close, and late responses.
+- Version 0.2.3 added multiplier validation, combined context/per-turn counter snapshots, model-change capacity clearing, timeout/close isolation, late startup subscribers, missing or expired quota windows, USD conversion, credential rotation, nullable metadata, environment scope, and error redaction.
 
-## Public Git 發布準備
+## Public Git distribution preparation
 
-- Manifest 加入鎖定嘅 production dependency 安裝步驟：`npm ci --omit=dev --ignore-scripts`。喺只複製 tracked source 嘅乾淨目錄成功安裝，並驗證 SDK 嘅 `createSession`／`resumeSession`／`listModels` exports；無建立 model turn 或呼叫 login。
-- 發布設定更新後，typecheck 同全部 109 個 tests 再次通過。
-- Gitleaks 8.30.1 掃描發布前嘅完整 Git history 同準備公開嘅 source，未發現 secrets。另檢查 tracked paths 同 lockfile，確認無 credentials／environment／private-key 檔案，419 個 dependency entries 均有版本、官方 npm resolved URL 同 SHA-512 integrity，URL 無內嵌認證。
-- `.test-output/`、`node_modules/`、本機 environment、Factory／Paseo 設定同常見 credential／key files 已設為 Git ignored。測試使用合成 credentials，唔包含實際 login；原始實測輸出保留喺本機 `.test-output/`，無包含喺公開 source。
-- 呢啲係本機發布前檢查，唔代表 Paseo registry 已完成 review 或批准上架。
+- Added the locked production preparation command `npm ci --omit=dev --ignore-scripts`. It succeeded in a clean directory containing only tracked source. SDK exports `createSession`, `resumeSession`, and `listModels` were available without a model turn or login call.
+- Typecheck and all 109 tests passed again after the distribution changes.
+- Gitleaks 8.30.1 found no secrets in the complete pre-publication Git history or release source. Tracked-path and lockfile checks found no credential, environment, or private-key files. All 419 dependency entries had versions, official npm resolved URLs, and SHA-512 integrity; URLs contained no embedded credentials.
+- `.test-output/`, `node_modules/`, local environment files, Factory/Paseo configuration, and common credential/key files are Git ignored. Tests use synthetic credentials. Raw live-test output stays in local `.test-output/` and is excluded from the public source.
+- These were local publication checks, independent of the registry's subsequent review and approval.
 
-## 真實 Droid／Paseo
+## Live Droid and Paseo
 
-- Plugin `droid-native` 本機安裝成功，狀態 `running`，provider `available`。
-- 明確移除 `FACTORY_API_KEY` 嘅 no-model catalog probe 成功，取得 67 個 models，沿用已登入 CLI。
-- Paseo provider discovery 取得同一份 67-model catalog，同 Ask／Spec／Auto modes。
-- 測試 agent `cb81ef06-f3f5-48c6-a56c-cc47732f9e96` 使用 `droid-native/gpt-6-luna`、low reasoning、Ask mode。
-- 真實 Execute permission 經 Paseo request／response bridge，選 `proceed_once` 後寫入 `.test-output/droid-proof.txt`；內容為 `PASEO_DROID_NATIVE_7F3C`。
-- Droid 回覆同一 marker；Paseo persistence 保存 user／reasoning／completed tool／assistant snapshots。
-- 執行 `paseo agent reload` 重啟測試 agent 後，再要求唔用 tools／唔讀檔回憶 marker；成功回覆原值，證明 native context resume。
-- 真實 AskUser request 成功轉成 Paseo question payload；執行 Stop 後返回 idle，pending permissions 為 0。
+- The local `droid-native` plugin installed successfully, reported `running`, and registered an `available` provider.
+- A catalog probe with `FACTORY_API_KEY` explicitly removed returned 67 models using the existing CLI login, without a model turn.
+- Paseo provider discovery returned the same 67-model catalog and Ask/Spec/Auto modes.
+- Test agent `cb81ef06-f3f5-48c6-a56c-cc47732f9e96` used `droid-native/gpt-6-luna`, low reasoning, and Ask mode.
+- A real Execute permission crossed the Paseo request/response bridge. Selecting `proceed_once` wrote `.test-output/droid-proof.txt` containing `PASEO_DROID_NATIVE_7F3C`.
+- Droid returned the same marker, and Paseo persistence saved user, reasoning, completed-tool, and assistant snapshots.
+- After `paseo agent reload`, the agent recalled the original marker without tools or file reads, demonstrating native context resume.
+- A real AskUser request became a Paseo question payload. Stop returned the agent to idle with zero pending permissions.
 
-## 0.2.0 steering／附件
+## 0.2.0 steering and attachments
 
-- 透過官方 Paseo SDK 嘅 public API，向同一個測試 agent 傳入合成 PNG、PDF 同 UTF-8 文字檔。
-- Agent 禁用工具讀檔，仍正確回覆：`Left: red; right: blue; PDF: PDF_MARKER_5A91; text: TEXT_NOTE_9B72`。
-- Agent 等待 AskUser 回應期間，以 `activeTurnBehavior: "steer"` 更新最終輸出要求；回應問題後得到 `STEERED_PASEO_RESULT`。
-- 完整 event subscription 只收到一次 `turn_started` 同一次 `turn_completed`，兩者 turn ID 都係 `c02eb9ca-d847-4181-8ee5-bd6bb2581e3d`；無 canceled／failed event。
-- 原生 Droid CLI 另外做咗 sleep-tool 邊界 probe：工具執行中加入 steering，原有工具完成，收到新指示，只有一個 completion，無 interrupt。
-- Request 用 `queuePlacement: "end_of_turn"` 同 `skipAgentLoop: true`。Idle probe 確認只 append history，觀察期無 model／tool／usage event，唔會另啟 loop。
-- 原始證據：`.test-output/paseo-features-smoke.json`、`steering-native-skip-probe.json`、`steering-native-idle-probe.json`、`final-unit-tests.tap`。
+- The public Paseo SDK API delivered synthetic PNG, PDF, and UTF-8 text attachments to the same test agent.
+- With file-reading tools prohibited, it still returned `Left: red; right: blue; PDF: PDF_MARKER_5A91; text: TEXT_NOTE_9B72`.
+- While the agent awaited an AskUser response, `activeTurnBehavior: "steer"` changed the requested final output. Answering the question produced `STEERED_PASEO_RESULT`.
+- The complete event subscription recorded exactly one `turn_started` and one `turn_completed`, both for `c02eb9ca-d847-4181-8ee5-bd6bb2581e3d`, without canceled or failed events.
+- A separate native CLI sleep-tool probe accepted steering while the tool ran. The original tool finished, the new instruction was processed, and there was one completion without interrupt.
+- Requests used `queuePlacement: "end_of_turn"` and `skipAgentLoop: true`. An idle probe appended history without model, tool, or usage events during observation and did not start another loop.
+- Local evidence: `.test-output/paseo-features-smoke.json`, `steering-native-skip-probe.json`, `steering-native-idle-probe.json`, and `final-unit-tests.tap`.
 
-## 0.2.1 原生 steering 組合實測
+## 0.2.1 combined native steering checks
 
-- 原生 Execute sleep 工具執行期間，同時注入 PNG、PDF 同文字附件。Droid 正確回覆 `STEER_ATTACH_OK`、red／blue、`PDF_MARKER_5A91` 同 `TEXT_NOTE_9B72`。
-- 只有一次 native result（success、interrupted=false），無 interrupt request；原有工具完成後處理 steering。
-- 真實 UI 測試曾捉到 AskUser 清理錯誤：`cancelled:true` 令 Droid 直接結束 loop，新指示雖已送達但無回覆。已改成 ACK 後以實際新指示作 freeform answer；Stop／close 仍使用 cancellation。
-- 修正後獨立 native probe 成功輸出 `ASK_SUPERSEDE_STEER_OK`：一條 AskUser、一次 result、零 interrupt。
-- 原始證據：`.test-output/steering-attachments-live.json`、`askuser-steering-supersede-proof.json`。
+- A running native Execute sleep tool received steering with PNG, PDF, and text attachments. Droid correctly returned `STEER_ATTACH_OK`, red/blue, `PDF_MARKER_5A91`, and `TEXT_NOTE_9B72`.
+- There was one successful native result with `interrupted=false` and no interrupt request. The original tool finished before the steering was processed.
+- Live UI testing exposed an AskUser cleanup error: `cancelled:true` ended the native loop after the new instruction was delivered. The fix supplies the new instruction as a freeform answer after ACK. Stop and close continue to use cancellation.
+- A separate native probe then returned `ASK_SUPERSEDE_STEER_OK` with one AskUser request, one result, and zero interrupts.
+- Local evidence: `.test-output/steering-attachments-live.json` and `askuser-steering-supersede-proof.json`.
 
-## Desktop UI（full access）
+## Desktop UI with full access
 
-使用者開啟 full access 後，Computer Use 操作同截圖穩定保留喺測試 tab。之前未完成嘅原因係每次 approval 會返回開發對話，導致目標 tab 失焦；唔係 Droid provider 自行切換 tab。今次經官方 `paseo agent open` 定位，再用 native app accessibility、click 同 screenshot 實測。
+After full access was enabled, Computer Use actions and screenshots remained on the test tab. Earlier approval prompts had returned focus to the development conversation. The Droid provider itself had not switched tabs. Tests used the official `paseo agent open` command followed by native accessibility, clicks, and screenshots.
 
-- Provider／model picker：顯示 Droid Native (PoC)、robot icon 同 GPT-6 Luna 搜尋結果。
-- Reasoning picker：None／Low／Medium／High／Extra high／Max；mode picker：Ask／Spec／Auto low／medium／high。
-- 經 Upload file 實際加入 PDF、文字檔，再用 Add image 加入 PNG。發送前後都有 filename cards 同紅藍縮圖。
-- UI 送出後，Droid 無用工具仍正確回覆 `UI_ATTACHMENT_OK left red/right blue; PDF_MARKER_5A91; TEXT_NOTE_9B72`。
-- AskUser：問題、One／Two radio buttons、Other input、Dismiss／Submit 均可見；選 Two 並 Submit 後，Droid 回覆 `Two`。
-- 修正後再開 AskUser，直接用 composer 嘅 Send and steer 發送新指示；舊卡消失，Droid 正確回覆 `UI_STEER_FIXED_OK`。Event subscription 只有一次 start 同一次 complete，turn ID 均為 `3daba7e6-771b-4f15-9152-01fb6e8739e7`，無 canceled／failed。
-- Tool approval：可見完整命令嘅 accessibility text、allow-once／always／cancel buttons；只點 allow-once，成功寫出 `.test-output/ui-tool-proof.txt`，內容 `UI_TOOL_OK`，並顯示同一回覆。
-- Spec plan card：完整顯示 `UI_PLAN_MARKER_83A2`、兩個 numbered steps 同 `END_PLAN_83A2`；點 No, keep iterating on spec 後返回 idle，無執行計劃。
-- 新測試 agent `b45c20af-2502-47dd-b590-a7d7095f6f83` 等待 Execute approval 時，點 Send and steer 要求放棄寫檔。Provider 回報不可用，Paseo 轉 Interrupt／replacement，回覆 `UI_GUARD_CANCELLED`；`.test-output/ui-guard-must-not-exist.txt` 確認不存在。呢個係 fallback，唔係同一 turn steering。
-- 測試期間將 Default send 由 Queue 暫時改成 Steer；完成後已經 UI 還原 Queue。兩個測試 agent 最後均為 idle、activeTurn=null、pending permissions=0。
-- 修正後 UI turn events：`.test-output/ui-after-fix-events.json`。Screenshot／AX 證據已喺 Computer Use 工具輸出檢視，無聲稱另外保存本機 screenshot 檔。
+- The provider/model picker showed the historical `Droid Native (PoC)` label, robot icon, and GPT-6 Luna search results.
+- Reasoning choices were None, Low, Medium, High, Extra high, and Max. Modes were Ask, Spec, and Auto low/medium/high.
+- Upload file added a PDF and text document; Add image added a PNG. Filename cards and the red/blue preview appeared before and after sending.
+- The UI-delivered attachments produced `UI_ATTACHMENT_OK left red/right blue; PDF_MARKER_5A91; TEXT_NOTE_9B72` without file-reading tools.
+- AskUser showed the question, One/Two radio buttons, Other input, and Dismiss/Submit controls. Selecting Two and submitting produced `Two`.
+- A subsequent AskUser was superseded through the composer's Send and steer action. The old card disappeared and Droid returned `UI_STEER_FIXED_OK`. Events showed one start and one completion for `3daba7e6-771b-4f15-9152-01fb6e8739e7`, without canceled or failed events.
+- Tool approval exposed the full command in accessibility text and allow-once/always/cancel controls. Allow-once wrote `.test-output/ui-tool-proof.txt` containing `UI_TOOL_OK`, with the same assistant reply.
+- The Spec plan card showed `UI_PLAN_MARKER_83A2`, both numbered steps, and `END_PLAN_83A2`. No, keep iterating on spec returned the agent to idle without executing the plan.
+- While agent `b45c20af-2502-47dd-b590-a7d7095f6f83` awaited Execute approval, Send and steer requested abandoning the write. The old unavailable response caused Paseo to interrupt and replace the turn, producing `UI_GUARD_CANCELLED`. `.test-output/ui-guard-must-not-exist.txt` was absent. This was fallback behavior rather than same-turn steering.
+- Default send was temporarily changed from Queue to Steer and restored to Queue through the UI. Both test agents ended idle with `activeTurn=null` and zero pending permissions.
+- Post-fix UI events: `.test-output/ui-after-fix-events.json`. Screenshots and accessibility output were inspected in Computer Use results; no separate local screenshot files were claimed for these checks.
 
-## 0.2.2 rejected Steer 修正
+## 0.2.2 rejected-Steer fix
 
-- Plugin 直接 reject 未獲接收嘅 steering `send()`，保留原錯誤；唔再 emit 會被 host 視為 unavailable 嘅 failed disposition。一般 prompt 仍然非同步，唔會阻住 permission／interrupt。
-- 用 unmodified installed Paseo adapter 同 AgentManager methods 做 model-free integration：舊 failed-event 對照會 cancel＋replacement；新 pending-tool／invalid-image／rejected-ACK 都係 error，cancel=0、replacement=0。成功 steering 保留同一 ID。
-- 真實 UI 再試 pending Execute → Send and steer：顯示 Resolve the pending Droid tool approval，原 approval card 同草稿保留。
-- 前後 active turn 同為 `e1b4b0eb-608c-44b2-87fe-98854bc8d571`；permission ID 同為 `droid-permission-5a03f63a-a9bb-4e9b-9c24-e7e7eea4e43f`。測試後明確 deny，返回 idle；`ui-guard-022-must-not-exist.txt` 不存在。
-- 證據：`.test-output/steering-rejection-installed-host.json`、`ui-steer-rejection-022.json`。
+- Unaccepted steering now rejects `send()` with the original error instead of emitting a failed disposition that the host treats as unavailable. Ordinary prompts remain asynchronous so permissions and interrupt are not blocked.
+- Model-free integration used the unmodified installed Paseo adapter and AgentManager methods. The old failed-event control canceled and replaced the turn; pending-tool, invalid-image, and rejected-ACK cases with the fix returned errors with cancel=0 and replacement=0. Accepted steering retained its turn ID.
+- The live UI pending-Execute → Send and steer check showed Resolve the pending Droid tool approval while preserving the approval card and draft.
+- Before and after, the active turn was `e1b4b0eb-608c-44b2-87fe-98854bc8d571` and the permission was `droid-permission-5a03f63a-a9bb-4e9b-9c24-e7e7eea4e43f`. Explicit denial then returned the agent to idle; `ui-guard-022-must-not-exist.txt` was absent.
+- Local evidence: `.test-output/steering-rejection-installed-host.json` and `ui-steer-rejection-022.json`.
 
-## Paseo MCP orchestration 實測
+## Live Paseo MCP orchestration
 
-- Root Codex 經真實 Paseo `create_agent` 建立 native Droid parent `a62121e4-3bb0-4513-9fc4-2dfe3927d696`，model `gpt-6-luna`，Ask mode。
-- Droid 讀取 Paseo skill，使用實際 `paseo___list_profiles`／`list_providers`／`list_models`，再用 `paseo___create_agent` 建立 Codex child `8fea1eae-223a-48cb-b867-3a2a5c86a484`（`codex/gpt-6.1-sol`、Full Access、low）。
-- Codex child 回覆 `CODEX_CHILD_R7E2`；Droid 收到自動通知後，用 `paseo___send_agent_prompt` 跟進同一 child；再收到 `CODEX_FOLLOWUP_M9D4` 通知，最終回報 `ORCHESTRATION_COMPLETE` 同兩個真實 replies。
-- Parent 冇輪詢 `get_agent_status`／`list_agents`，冇用 CLI／Factory Task 代替 MCP。Ask mode 嘅 MCP permissions 由 root 逐次選 proceed_once，冇選 always allow。
-- 真實 MCP batch approval 同時包含 list_profiles／list_providers；UI 可捲動睇到兩項完整 review，補上之前未做嘅 batch card 視覺證據。
-- 證據：`.test-output/orchestration-parent-timeline.json`、`orchestration-live-events.json`，以及 Codex child 嘅兩個實際 user／assistant turns。
+- Root Codex used the real Paseo `create_agent` tool to create native Droid parent `a62121e4-3bb0-4513-9fc4-2dfe3927d696` with `gpt-6-luna` and Ask mode.
+- Droid read the Paseo skill, called `paseo___list_profiles`, `list_providers`, and `list_models`, then used `paseo___create_agent` to create Codex child `8fea1eae-223a-48cb-b867-3a2a5c86a484` with `codex/gpt-6.1-sol`, Full Access, and low reasoning.
+- The child returned `CODEX_CHILD_R7E2`. After its automatic notification, Droid followed up through `paseo___send_agent_prompt`, received `CODEX_FOLLOWUP_M9D4`, and reported `ORCHESTRATION_COMPLETE` with both actual replies.
+- The parent did not poll `get_agent_status` or `list_agents` or substitute CLI/Factory Task calls for MCP. Root selected `proceed_once` for each Ask-mode MCP permission, without always-allow approval.
+- A real MCP batch approval included list_profiles and list_providers together. Both full actions were visible in the scrollable review UI.
+- Local evidence: `.test-output/orchestration-parent-timeline.json`, `orchestration-live-events.json`, and the child's two actual user/assistant turns.
 
-### Reload／Script MCP compatibility
+### Reload and Script MCP compatibility
 
-- Reload 後曾出現「工具不可用」嘅模型回覆；原始 ToolSearch 結果實際係工具已存在。Public SDK inventory 亦確認 `paseo___send_agent_prompt` registered／allowed，所以唔將模型回覆當成工具遺失證據。
-- 改用 `gpt-6.1-sol`、medium、Ask 後，實際呼叫暴露另一個問題：Droid 0.244.0 嘅 Script permission 未納入 SDK 0.9.1 schema。新增兼容層，只接收已確認嘅 API `1.0.0`／native protocol `1.269.0`，並保留 SDK protocol `1.201.1` 原有處理。Native options 嘅 `selectedColor`／`selectedPrefix` 只作 presentation strings。
-- 新版 Script card 經 Desktop AX 同 screenshot 核對，完整 script、解析後嘅 child ID／prompt／background／notifyOnFinish 均可捲動檢視；只提供 allow-once／cancel。Root 逐次選 once，冇改 persistent MCP config／tool policy。
-- 首次成功傳遞得到 `CODEX_RELOAD_P4A7.`；MCP 同通知成功，但因多一個句號，嚴格字串比對未通過。用明確 tag-delimited prompt 再做一次格式檢查，Codex child 精確回覆 `CODEX_RELOAD_Q6B9`，Droid 精確回覆 `ORCHESTRATION_RELOAD_OK: CODEX_RELOAD_Q6B9`。
-- 最終 proof 獨立 assert：parent 嘅 Script 同 `paseo___send_agent_prompt` 都 completed；child 真實 user／assistant turn 匹配；parent 收到通知後嘅回覆仍喺同一 turn `7306aff3-2fe1-4741-b32b-5a825982f230`。唔用 user prompt 含 marker 作成功判斷。
-- 證據：`.test-output/orchestration-reload-proof.json`、`orchestration-reload-final-timeline.json`、`orchestration-reload-child-timeline.json`。最終 parent／child idle；另外兩個 Droid 測試 agents 因 plugin reload 而 closed；全部 activeTurn=null、pending permissions=0。
+- After reload, the model reported a tool as unavailable even though the raw ToolSearch result and public SDK inventory showed `paseo___send_agent_prompt` registered and allowed. The model's statement was not treated as evidence that the tool had disappeared.
+- Switching to `gpt-6.1-sol`, medium reasoning, and Ask exposed a separate real incompatibility: Droid 0.244.0's Script permission was absent from SDK 0.9.1's schema. The added bridge accepts the verified API `1.0.0` and native protocol `1.269.0`, preserving the SDK's `1.201.1` handling. Native `selectedColor` and `selectedPrefix` remain presentation strings.
+- Desktop accessibility and screenshots showed the complete Script, parsed child ID, prompt, background, and notifyOnFinish fields in a scrollable card. Only allow-once and cancel were offered. Root selected once without changing persistent MCP configuration or tool policy.
+- The first successful delivery returned `CODEX_RELOAD_P4A7.`. MCP and notification delivery succeeded, but the trailing period failed the exact-output check. A tag-delimited prompt then produced exact child reply `CODEX_RELOAD_Q6B9` and parent reply `ORCHESTRATION_RELOAD_OK: CODEX_RELOAD_Q6B9`.
+- Independent assertions confirmed completed parent Script and `paseo___send_agent_prompt` calls, matching real child user/assistant turns, and a notification-driven parent reply within turn `7306aff3-2fe1-4741-b32b-5a825982f230`. A marker merely appearing in the user prompt was not counted as success.
+- Local evidence: `.test-output/orchestration-reload-proof.json`, `orchestration-reload-final-timeline.json`, and `orchestration-reload-child-timeline.json`. Parent and child finished idle. Two other Droid test agents closed during reload; all had `activeTurn=null` and zero pending permissions.
 
-## 0.2.3 model multiplier／Usage
+## 0.2.3 model multipliers and usage
 
-- Model label 直接使用 live Droid catalog `tokenMultiplier`；Desktop picker 同 selected trigger 已見 `GPT-6.1 Sol · 0.8×`、`GPT-6 Astra · 4×`、`GPT-6 Luna · 0.04×`。未知 multiplier 保留原名，未硬編 pricing。
-- 實際 native `getContextStats()` no-model probe 成功，回報 estimated occupancy 同 model limit；唔用累計 tokenUsage 當 context。經 Paseo 發送 `USAGE_CHECK_OK` 測試 prompt 後，Desktop meter 顯示 `3% used · 29k / 922k tokens`。
-- 首次 reload 曾因 host 太遲 subscribe 而漏咗 early usage。Installed adapter probe 確認：早到 usage 有 cache，但 subscribe 唔 replay；late idle usage 則正常。插件已喺 ready 後以 250／1000／3000ms 限次重發最新 snapshot，無額外 native RPC，close 取消 timers，host 只會替換 lastUsage，唔會重複累加 tokens。呢個係限次補償，唔係 host subscription ACK；如果 host 初始化超出重發期，仍要等下一次有效 usage update。
-- 最終 plugin／agent reload 後，未再發 prompt 已取得 `contextWindowUsedTokens=27914`／`contextWindowMaxTokens=922000`，Desktop 顯示 3%；model 暫時切換到 Luna 再還原 Sol，label 同 context refresh 正常，無新 model turn。
-- Read-only Factory `/api/billing/limits` probe、正式 source adapter、installed Paseo global Usage 都成功。取得 Standard used 3／39／37%、Core used 0／0／22%，API reset 日期正常；Extra Usage USD balance 為 0。呢啲係 2026-10-17 實測瞬間值，唔係固定套餐資料。
-- Desktop Usage modal 真實顯示 Factory card、六個 window、reset countdown 同 Extra Usage 餘額；另有 Standard remaining 97／61／63%、Core remaining 100／100／78%，毋須改全域顯示偏好。未更改帳戶／套餐／overage 設定，未 refresh 或寫入 credentials；只讀現有 macOS Keychain login。
-- 證據：`.test-output/factory-quota-readonly.json`、`usage-source-live.json`、`paseo-usage-live.json`、`context-meter-reload-live.json`、`context-meter-model-change-live.json`；Desktop AX／screenshots 已喺 Computer Use 輸出檢視。
-- 已確認 host 限制：generic `PluginAgentSession` 缺 `usageSession()`，agent-scoped `listUsageReports` 會喺呼叫 source 前返回空陣列；全域 Usage 正常。Installed registry probe 亦確認 sessionDiscoverCalls=0／globalDiscoverCalls=1。暫未修改 Paseo core，所以 Factory account quota 喺全域 Usage 查看，context meter 喺對話查看。
+- Live `tokenMultiplier` values appeared in the Desktop picker and selected trigger as `GPT-6.1 Sol · 0.8×`, `GPT-6 Astra · 4×`, and `GPT-6 Luna · 0.04×`. Unknown multipliers retained their names without hardcoded pricing.
+- A native `getContextStats()` probe without a model turn returned estimated occupancy and the model limit, separately from cumulative tokenUsage. After the Paseo `USAGE_CHECK_OK` prompt, the Desktop meter showed `3% used · 29k / 922k tokens`.
+- The first reload missed early usage because the host subscribed too late. An installed-adapter probe confirmed that early usage was cached without subscription replay, while later idle usage worked. The plugin now re-emits its latest snapshot at bounded 250/1000/3000ms intervals after ready, with no extra native RPC and with timers canceled on close. The host replaces lastUsage rather than adding tokens. This is bounded compensation, not a subscription ACK; initialization beyond that window still requires the next valid usage update.
+- A final plugin/agent reload yielded `contextWindowUsedTokens=27914` and `contextWindowMaxTokens=922000` before another prompt; Desktop showed 3%. Switching from Sol to Luna and back refreshed the label and context without a model turn.
+- The read-only Factory `/api/billing/limits` probe, production source adapter, and installed Paseo global Usage all succeeded. Observed Standard usage was 3/39/37%, Core usage 0/0/22%, with valid reset dates and Extra Usage USD balance 0. These were observations on 2026-10-17, not fixed plan allowances.
+- The Desktop Usage modal showed the Factory card, six windows, reset countdowns, Extra Usage balance, Standard remaining 97/61/63%, and Core remaining 100/100/78%, without changing global display preferences. No account, plan, or overage setting changed; credentials were neither refreshed nor written. The existing macOS Keychain login was read only.
+- Local evidence: `.test-output/factory-quota-readonly.json`, `usage-source-live.json`, `paseo-usage-live.json`, `context-meter-reload-live.json`, and `context-meter-model-change-live.json`. Desktop accessibility and screenshots were inspected in Computer Use output.
+- A confirmed host limit is the generic `PluginAgentSession`'s missing `usageSession()`. Agent-scoped `listUsageReports` returned an empty list before source discovery; global Usage worked. An installed-registry probe showed sessionDiscoverCalls=0 and globalDiscoverCalls=1. Paseo core was unchanged: account quota remains in global Usage and model context in the conversation meter.
 
-## 0.2.4 session 開啟前自動刷新 catalog
+## 0.2.4 catalog refresh before session opening
 
-- 移除成功 catalog 嘅永久 cache；只保留相同 cwd／env 嘅 in-flight query，共用完成或失敗後都 retire。每次新 session、reload／resume 都重新讀取，並透過 `session.config` 發佈最新 models／multipliers。
-- Session catalog query 帶入該 session env override，同 native launch 保持一致。並行不同 account 唔共用結果。單一 session close 只中止自己等待，唔會取消其他 waiter；selected model 已下架／禁用時，喺 native create／resume 前回報錯誤。
-- 新增 7 個 deterministic regressions：同 cwd sequential multiplier／model 更新、resume freshness、picker／open overlap、不同 env、失敗重試同既有 session 隔離、移除 model、shared discovery 中取消一個 waiter。
-- 真實 CLI／SDK probe：先查 picker，再建立兩個同 cwd sessions，再 resume 第一個，discovery 次數依次為 1／2／3／4；每次取得 67 models，兩次 create 同一次 resume，冇 model turns。每次 listModels 約 2.0–2.8 秒。
-- 原始證據：`.test-output/catalog-refresh-native-smoke.json`、`catalog-refresh-tests.tap`、`final-unit-tests.tap`。
-- Installed Paseo 0.11.4 新建無 prompt 嘅測試 agent `2f9fe9dc-be4d-4172-a28d-1fd5c58629be`，約 3.38 秒完成；再 reload 同一 agent 成功，timeline 仍為 0、activeTurn=null、pending permissions=0。Desktop AX／screenshot 核對 `GPT-6.1 Sol · 0.8×`、空對話同 1% context meter。證據：`.test-output/paseo-catalog-refresh-live.json`。
-- 測試完成後已 archive 今次建立嘅空 test workspace／agent，未刪除 project directory；原有開發 workspace 同早前測試 agents 保留。
-- Draft selector 仍受 host snapshot cache 影響；啟動前 freshness 保證唔等於未按 Create 前已更新 picker。Explicit Refresh providers 而家可以穿透插件 cache，running session 嘅既有 config 唔會自動被其他 session 更新。
+- Removed permanent caching of successful catalogs. Only in-flight queries with identical working directory/environment are shared and retired after success or failure. New sessions and reload/resume query again and publish current models/multipliers through `session.config`.
+- Catalog discovery receives the session's environment overrides, matching native launch. Different environments are not merged. Closing one session cancels only its own wait. A removed or disabled selected model fails before native creation or resume.
+- Seven deterministic regressions cover sequential model/multiplier changes in the same directory, resume freshness, picker/open overlap, different environments, failed-query retries with running-session isolation, model removal, and cancellation of one shared-query waiter.
+- A live CLI/SDK probe queried the picker, created two sessions in the same directory, and resumed the first. Discovery counts advanced 1/2/3/4, with 67 models each, two creates, one resume, and no model turns. Each listModels call took about 2.0–2.8 seconds.
+- Local evidence: `.test-output/catalog-refresh-native-smoke.json`, `catalog-refresh-tests.tap`, and `final-unit-tests.tap`.
+- Installed Paseo 0.11.4 created prompt-free test agent `2f9fe9dc-be4d-4172-a28d-1fd5c58629be` in about 3.38 seconds and reloaded it successfully. The timeline stayed empty with `activeTurn=null` and zero pending permissions. Desktop accessibility/screenshots showed `GPT-6.1 Sol · 0.8×`, the empty conversation, and 1% context. Evidence: `.test-output/paseo-catalog-refresh-live.json`.
+- The new empty test workspace/agent was archived afterward without deleting the project directory. Existing development workspaces and earlier test agents were preserved.
+- Draft selectors remain subject to host snapshot caching. Freshness before native startup does not guarantee a refresh before Create. Explicit Refresh providers bypasses the plugin's old permanent cache; another session's discovery does not replace a running session's configuration.
 
-## 0.2.5 正式名稱（2026-10-18）
+## 0.2.5 display name, 2026-10-18
 
-- Manifest、provider label、README 同 OVERVIEW 統一使用 `Droid Native`，package／lockfile root version 更新到 0.2.5。Plugin／provider ID `droid-native`、registry ID `sunnypsk/droid` 同原有 dependencies 不變。
-- Typecheck 同全部 109 個 tests 通過；無新增 model turn，亦無改動 provider lifecycle、permissions、steering 或 persistence 邏輯。
-- 確認本機 Droid agents 均為 idle／closed 後 reload plugin。Desktop-managed Paseo 0.11.4 回報 plugin `running`，display name 為 `Droid Native`；未重啟 daemon。
-- 本輪 native Computer Use 無法穩定開啟 Settings，之後回報 `noWindowsAvailable`；因此本輪只確認 daemon 回報嘅名稱，未宣稱完成新版 selector 嘅視覺驗證。先前功能實測仍屬上面各版本嘅證據。
+- The manifest, provider label, README, and overview use `Droid Native`; package and lockfile root versions are 0.2.5. Plugin/provider ID `droid-native`, registry ID `sunnypsk/droid`, and dependencies are unchanged.
+- Typecheck and all 109 tests passed. No new model turn was started, and provider lifecycle, permissions, steering, and persistence logic were unchanged.
+- After confirming local Droid agents were idle or closed, the plugin was reloaded. Desktop-managed Paseo 0.11.4 reported `running` with display name `Droid Native`, without a daemon restart.
+- Native Computer Use could not reliably open Settings and later reported `noWindowsAvailable`. This release check confirmed the daemon-reported name, without claiming visual verification of the renamed selector. Earlier live feature tests remain evidence for their respective versions.
 
-## 證據邊界同已知限制
+## 0.2.6 English public copy, 2026-10-18
 
-Paseo 0.11.4 嘅即時 user row 會保留附件預覽，但 agent reload 重建 timeline 後，原本圖片／文件 cards 會消失，只保留文字。今次已實際觀察到；Droid context 仍保留附件。插件未補上 host 附件 history rendering。
+- README, the registry overview, and this public verification record are in English. Plugin metadata and runtime messages were already English. The display name remains `Droid Native`, with unchanged plugin/provider ID `droid-native` and registry ID `sunnypsk/droid`.
+- Package and lockfile root versions are 0.2.6. Production modules and the complete dependency tree remain unchanged from 0.2.5.
+- Multibyte test samples use Unicode escapes in source. TypeScript-parsed runtime strings are identical to the previous fixtures, preserving UTF-8 coverage and assertions.
+- Typecheck and all 109 tests passed. A scan of all 29 tracked files found no remaining CJK copy, and every existing inline code reference in the translated documents was retained.
+- This is a documentation and source-presentation update. Earlier CLI, model, MCP, and Desktop feature results above were not rerun for this release.
 
-Pending 工具／plan approval 仍須先明確處理，Droid 無公開 deny-and-continue outcome；但 0.2.2 唔再自動中斷／替換原 turn。如果 approval 喺 ACK 途中才出現，已送達嘅 steering 會保留，並提示先處理 approval。
+## Verification boundaries and known limitations
 
-舊 fallback source 證據為 installed `app.asar` 內 `node_modules/@getpaseo/server/dist/server/server/agent/plugin-provider.js:923`（非 matching steer → unavailable）、`agent-manager.js:1835`／`:1908`（replacement）。0.2.2 改用 rejected acceptance，已經透過實際 plugin subprocess 喺 UI 驗證；未修改 host。
+Paseo 0.11.4 preserves attachment previews in live user rows, but reconstructed rows after agent reload retain only text. Droid retains the native attachments. Host attachment-history rendering is not implemented by this plugin.
 
-Native retraction 只做 source 檢查，未有真實 model retry/retraction 嘅完整 UI 證據。Host 會丟棄空文字 snapshot，native retraction 未保證清走已顯示文字。
+Pending tool/plan approvals still require an explicit decision. Droid exposes no public deny-and-continue result. Version 0.2.2 prevents automatic turn interruption/replacement after rejected steering. Steering delivered before a newly arriving approval remains in history, with an instruction to resolve that approval first.
 
-亦嘗試過獨立 Chrome client `app.paseo.sh` 直連本機 daemon，結果 connection timeout。無改動 daemon web UI 設定或重啟 daemon。今次 UI 證據限 macOS Desktop 現有深色畫面；compact／手機 layout、實體裝置、daemon restart、長對話同 Mission mode 未驗證。ZIP／Office 等本機參考有 automated tests，未做 real model 解碼。
+The old host fallback was inspected in installed `app.asar`: `node_modules/@getpaseo/server/dist/server/server/agent/plugin-provider.js:923` mapped a nonmatching steer to unavailable, and `agent-manager.js:1835`/`:1908` performed replacement. Version 0.2.2 uses rejected acceptance and was verified through a real plugin subprocess in the UI. Host code was unchanged.
 
-MCP 注入同 tool-policy mapping 已實作，exact preapproval 有 automated tests；真實 Paseo MCP create／send／automatic notifications 已經雙向驗證。其他外部 MCP services 未逐一測試。
+Native retraction has source inspection only, without a complete live model retry/retraction UI check. The host drops empty text snapshots, so clearing previously displayed text after native retraction is not guaranteed.
 
-測試 agent 保留喺同一 workspace，方便手動查看；測試檔案放喺 git-ignored `.test-output/`。
+An independent Chrome client at `app.paseo.sh` timed out connecting directly to the local daemon. Daemon web UI settings were unchanged and the daemon was not restarted. Visual evidence is limited to the existing macOS Desktop dark appearance. Compact/mobile layouts, physical devices, daemon restart, long conversations, and Mission mode were not verified. ZIP/Office local references have automated coverage without a real model decoding check.
+
+MCP injection and tool-policy mapping are implemented, with exact preapproval covered by automated tests. Real Paseo create/send/automatic-notification orchestration was verified in both directions. Other external MCP services were not individually tested.
+
+Earlier test agents remain in the same workspace for manual inspection. Test files and raw evidence remain in Git-ignored `.test-output/`.

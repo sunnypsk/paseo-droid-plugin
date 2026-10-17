@@ -24,13 +24,13 @@ test("frames fragmented output and honors argument prefix and resolved environme
     const done = new Promise<void>((resolve) => { received = resolve; });
     transport.onMessage((frame) => { frames.push(frame); if (frames.length === 2) received(); });
     transport.onError((error) => { throw error; });
-    await transport.send('{"hello":"廣東話"}');
+    await transport.send('{"hello":"\u5ee3\u6771\u8a71"}');
     await Promise.race([done, new Promise((_, reject) => setTimeout(() => reject(new Error("No frames")), 1_000))]);
     assert.deepEqual(JSON.parse(frames[0]), {
       value: "session-override",
       argv: ["exec", "--input-format", "stream-jsonrpc", "--output-format", "stream-jsonrpc"],
     });
-    assert.deepEqual(JSON.parse(frames[1]), { hello: "廣東話" });
+    assert.deepEqual(JSON.parse(frames[1]), { hello: "\u5ee3\u6771\u8a71" });
   } finally {
     await transport.close();
   }
