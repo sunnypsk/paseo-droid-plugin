@@ -1,8 +1,8 @@
-# Droid Native PoC
+# Droid Native
 
 將本機 Factory Droid 接入 Paseo 嘅 agent selector、對話 timeline 同 permission cards。使用 Droid 官方 TypeScript SDK 同直接 JSON-RPC transport，沿用 Droid CLI 嘅登入狀態。
 
-需要 Paseo 0.11.4 或以上，以及已登入嘅 Droid 0.244.0+。本 PoC 以 macOS 同 SDK 0.9.1 驗證。Droid 必須喺 daemon host 上可以執行；可以透過 `agents.providers.droid-native.command` 設定 binary 路徑。
+需要 Paseo 0.11.4 或以上，以及已登入嘅 Droid 0.244.0+。目前版本以 macOS 同 SDK 0.9.1 驗證。Droid 必須喺 daemon host 上可以執行；可以透過 `agents.providers.droid-native.command` 設定 binary 路徑。
 
 可以選擇 model、reasoning effort、Ask／Spec／Auto mode；顯示 streaming 回覆、thinking 同 tool 狀態，並喺 Paseo 回應工具授權同 AskUser 問題。Paseo 傳入嘅 MCP servers 會交畀 Droid。
 
@@ -18,4 +18,4 @@ Quota 查詢會將現有 access token 同適用嘅 organization header 傳往 Fa
 
 每次真正建立或重新開啟 session 前都會刷新 model list 同 multiplier。重疊嘅相同查詢會合併，唔保留永久 catalog cache；啟動會多一次 discovery 等待，失敗時可重試。建立前嘅 draft picker 仍由 Paseo host cache 決定，session ready 後會用最新清單。
 
-呢個係 PoC，暫時未實作匯入其他既有 Droid 對話或 Mission mode。SDK 嘅 advanced plan actions 會限制為本插件已處理嘅選項。Auto high 會直接使用 Droid 對應嘅 autonomy level；預設 Ask mode 會等待授權。
+暫時未實作匯入其他既有 Droid 對話或 Mission mode。SDK 嘅 advanced plan actions 會限制為本插件已處理嘅選項。Auto high 會直接使用 Droid 對應嘅 autonomy level；預設 Ask mode 會等待授權。

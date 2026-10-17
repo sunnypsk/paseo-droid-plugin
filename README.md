@@ -1,12 +1,18 @@
-# Droid Native PoC for Paseo
+# Droid Native for Paseo
 
 獨立 Paseo provider plugin，透過 `@factory/droid-sdk` 同本機 Droid CLI 嘅 `stream-jsonrpc` 接駁。
 
 ## 安裝
 
-需要 Node.js 22、Paseo 0.11.4+，以及已登入嘅 Droid 0.244.0+。本次驗證使用 SDK 0.9.1；插件版本係 0.2.4。
+需要 Node.js 22、Paseo 0.11.4+，以及已登入嘅 Droid 0.244.0+。本次驗證使用 SDK 0.9.1；插件版本係 0.2.5。
 
-由 GitHub 安裝：
+由 Paseo 官方 plugin 目錄安裝：
+
+```sh
+paseo plugin add sunnypsk/droid
+```
+
+如果要直接安裝 GitHub source：
 
 ```sh
 paseo plugin add git:sunnypsk/paseo-droid-plugin
@@ -14,7 +20,7 @@ paseo plugin add git:sunnypsk/paseo-droid-plugin
 
 Paseo 會用已提交嘅 lockfile 安裝 production dependencies，唔會執行 dependency lifecycle scripts。Droid CLI 需要另外安裝並登入；插件唔會自動下載 Droid。
 
-本 repository 係社群 PoC；公開 GitHub source 唔代表已獲 Paseo 官方 registry 批准。
+本插件係社群維護嘅 Factory Droid provider，已列入 Paseo 官方 registry。Registry 安裝會使用已批准嘅 revision，GitHub source 可能包含較新嘅更新。
 
 如果要喺本機開發：
 
@@ -28,7 +34,9 @@ paseo plugin ls droid-native
 
 如果 `paseo` 未喺 PATH，macOS Desktop bundled CLI 喺 `/Applications/Paseo.app/Contents/Resources/bin/paseo`。
 
-開新 agent，揀 **Droid Native (PoC)**。原有 ACP provider `factory-droid` 可以並存。預設 Ask mode；Spec 係先提案，Auto low／medium／high 對應 Droid 原生 autonomy levels。Model 同 reasoning choices 由 Droid 即時回報。
+開新 agent，揀 **Droid Native**。原有 ACP provider `factory-droid` 可以並存。預設 Ask mode；Spec 係先提案，Auto low／medium／high 對應 Droid 原生 autonomy levels。Model 同 reasoning choices 由 Droid 即時回報。
+
+0.2.5 將顯示名稱統一為 Droid Native。Plugin／provider ID 仍然係 `droid-native`，registry ID 仍然係 `sunnypsk/droid`，現有設定同對話可以沿用。
 
 編輯後執行 typecheck，再用 `paseo plugin reload droid-native` 載入，毋須重啟 daemon。
 
@@ -56,7 +64,7 @@ Agent 工作中發送新訊息時，選擇 Paseo 嘅 **Steer**（Settings → Ge
 
 用 Paseo 嘅附件按鈕加入檔案。圖片／PDF／文字會傳入 Droid 原生 image／document input；ZIP、Office 或其他 binary 檔案會提供檔名、類型、大小同已驗證嘅本機路徑，讓 Droid 按需要選擇工具處理，唔代表已解碼內容。Paseo 文字 context、issue／PR 同 code-review context 亦有對應轉換。Timeline 只保留附件標記，唔會重複保存 base64／整份文件。
 
-Paseo 0.11.4 即時發送時會顯示圖片／文件 preview，但 agent reload 後重新建立嘅 user row 只顯示文字，附件縮圖會消失。Droid 原生 context 仍保留附件；呢個 PoC 未補上 host 嘅附件 history rendering。
+Paseo 0.11.4 即時發送時會顯示圖片／文件 preview，但 agent reload 後重新建立嘅 user row 只顯示文字，附件縮圖會消失。Droid 原生 context 仍保留附件；插件未補上 host 嘅附件 history rendering。
 
 每則訊息最多 20 個附件；原生輸入合共 16 MiB、每張圖片 10 MiB、每份文字 2 MiB。其他本機檔案參考最多 256 MiB，插件只讀少量格式 header。無法讀取、大小改變、格式不符或 model 不支援圖片時會顯示錯誤。
 

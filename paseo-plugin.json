@@ -1,6 +1,6 @@
 {
   "id": "droid-native",
-  "name": "Droid Native PoC",
+  "name": "Droid Native",
   "description": "Native Factory Droid sessions, steering, attachments and usage in Paseo.",
   "media": [],
   "build": [["npm", "ci", "--omit=dev", "--ignore-scripts"]],

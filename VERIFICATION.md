@@ -1,4 +1,4 @@
-# PoC 驗證記錄
+# Droid Native 驗證記錄
 
 日期：2026-10-17。環境：macOS、本機 Desktop-managed Paseo 0.11.4、Droid 0.244.0、Factory SDK 0.9.1。
 
@@ -114,9 +114,16 @@
 - 測試完成後已 archive 今次建立嘅空 test workspace／agent，未刪除 project directory；原有開發 workspace 同早前測試 agents 保留。
 - Draft selector 仍受 host snapshot cache 影響；啟動前 freshness 保證唔等於未按 Create 前已更新 picker。Explicit Refresh providers 而家可以穿透插件 cache，running session 嘅既有 config 唔會自動被其他 session 更新。
 
+## 0.2.5 正式名稱（2026-10-18）
+
+- Manifest、provider label、README 同 OVERVIEW 統一使用 `Droid Native`，package／lockfile root version 更新到 0.2.5。Plugin／provider ID `droid-native`、registry ID `sunnypsk/droid` 同原有 dependencies 不變。
+- Typecheck 同全部 109 個 tests 通過；無新增 model turn，亦無改動 provider lifecycle、permissions、steering 或 persistence 邏輯。
+- 確認本機 Droid agents 均為 idle／closed 後 reload plugin。Desktop-managed Paseo 0.11.4 回報 plugin `running`，display name 為 `Droid Native`；未重啟 daemon。
+- 本輪 native Computer Use 無法穩定開啟 Settings，之後回報 `noWindowsAvailable`；因此本輪只確認 daemon 回報嘅名稱，未宣稱完成新版 selector 嘅視覺驗證。先前功能實測仍屬上面各版本嘅證據。
+
 ## 證據邊界同已知限制
 
-Paseo 0.11.4 嘅即時 user row 會保留附件預覽，但 agent reload 重建 timeline 後，原本圖片／文件 cards 會消失，只保留文字。今次已實際觀察到；Droid context 仍保留附件。PoC 未補上 host 附件 history rendering。
+Paseo 0.11.4 嘅即時 user row 會保留附件預覽，但 agent reload 重建 timeline 後，原本圖片／文件 cards 會消失，只保留文字。今次已實際觀察到；Droid context 仍保留附件。插件未補上 host 附件 history rendering。
 
 Pending 工具／plan approval 仍須先明確處理，Droid 無公開 deny-and-continue outcome；但 0.2.2 唔再自動中斷／替換原 turn。如果 approval 喺 ACK 途中才出現，已送達嘅 steering 會保留，並提示先處理 approval。
 

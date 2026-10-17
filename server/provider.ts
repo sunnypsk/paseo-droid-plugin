@@ -60,7 +60,7 @@ const defaults: DroidDependencies = { createSession, resumeSession, listModels, 
 export function createDroidProvider(deps: DroidDependencies = defaults): ProviderRegistration {
   return {
     id: "droid-native",
-    label: "Droid Native (PoC)",
+    label: "Droid Native",
     description: "Factory Droid through its direct SDK protocol",
     icon: "icon.svg",
     command: ["droid"],
