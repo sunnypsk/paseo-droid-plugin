@@ -162,7 +162,7 @@ export function detailForTool(name: string, input: Record<string, unknown>, outp
     return { type: "write", filePath, content: content === undefined ? undefined : previewToolText(content) };
   }
   if (["grep", "glob", "search", "websearch"].includes(kind)) return {
-    type: "search", query: string(input, "pattern", "query", "search_term") ?? "",
+    type: "search", query: kind === "glob" ? globQuery(input) : string(input, "pattern", "query", "search_term") ?? "",
     toolName: kind === "websearch" ? "web_search" : kind === "grep" ? "grep" : kind === "glob" ? "glob" : "search", content: output,
   };
   if (["fetchurl", "webfetch", "fetch"].includes(kind)) return { type: "fetch", url: string(input, "url") ?? "", result: output };
@@ -172,6 +172,14 @@ export function detailForTool(name: string, input: Record<string, unknown>, outp
   const inputText = `Input:\n${toolInputPreview(input)}`;
   const text = output === undefined ? inputText : `${inputText}\n\nOutput:\n${outputPreview(output, MAX_TOOL_TEXT - inputText.length - 10)}`;
   return { type: "plain_text", label: name, text: previewToolText(text), icon: "wrench" };
+}
+
+function globQuery(input: Record<string, unknown>): string {
+  const patterns = typeof input.patterns === "string" ? input.patterns
+    : Array.isArray(input.patterns) ? input.patterns.filter((value): value is string => typeof value === "string").join(", ")
+    : string(input, "pattern", "query", "search_term") ?? "";
+  const folder = string(input, "folder", "cwd", "path");
+  return previewToolText(folder ? `${patterns} (in ${folder})` : patterns);
 }
 
 type TodoItem = Extract<ProviderTimelineItem, { type: "todo" }>;

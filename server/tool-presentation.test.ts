@@ -2,6 +2,20 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { detailForTool, todoUpdateForTool, toolInputPreview, toolResultText } from "./tool-presentation";
 
+test("Glob cards show every native pattern and search folder while retaining results", () => {
+  for (const patterns of ["**/*.ts", ["**/*.ts", "docs/**/*.md"]]) {
+    const detail = detailForTool("Glob", { patterns, folder: "/project" }, "matching-file.ts");
+    assert.equal(detail.type, "search");
+    if (detail.type !== "search") throw new Error("Expected search detail");
+    assert.equal(detail.query, `${Array.isArray(patterns) ? patterns.join(", ") : patterns} (in /project)`);
+    assert.equal(detail.content, "matching-file.ts");
+  }
+  const legacy = detailForTool("Glob", { pattern: "*.json" });
+  assert.equal(legacy.type === "search" && legacy.query, "*.json");
+  const bounded = detailForTool("Glob", { patterns: ["x".repeat(100000)], folder: "/project" });
+  assert.ok(bounded.type === "search" && bounded.query.length < 64100);
+});
+
 test("Script and MCP cards retain the operation, target and prompt after completion", () => {
   const script = "await tools.paseo___send_agent_prompt({ agentId: 'child-123', prompt: 'Review the release plan' });";
   const input = { script, background: true, notifyOnFinish: true };

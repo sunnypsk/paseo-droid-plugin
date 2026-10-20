@@ -11,7 +11,6 @@ import { execCommand } from "@getpaseo/plugin/server";
 import {
   negotiateProviderCapabilities,
   requireProviderCapabilities,
-  ProviderEventSchema,
   type ProviderRegistration,
   type ProviderConnection,
   type ProviderEvent,
@@ -35,14 +34,14 @@ import { createSteeringTransport, SteeringRejectedError } from "./steering";
 import { createPermissionCompatibilityTransport } from "./permission-compatibility";
 import { updateSessionSettings, DroidSettingsTimeoutError } from "./settings";
 import { TimelinePersistence } from "./persistence";
+import { FileSnapshotStore, type SnapshotStore } from "./snapshot-store";
+import { observeSession, type NativeUpdate, type NativeCompletion } from "./session-events";
 
 export const supported = ["prompt.message", "prompt.image", "prompt.steer", "session.configure", "session.persistence", "permission", "permission.tool_policy"] as const;
 const optionsSchema = z.object({
   disableBuiltinSkills: z.boolean().optional(),
   disabledToolIds: z.array(z.string()).optional(),
 }).strict();
-const timelineItemSchema = z.custom<ProviderTimelineItem>((value) => ProviderEventSchema.safeParse({ type: "timeline.item", sessionId: "restore", item: value }).success);
-const persistenceSchema = z.object({ nativeSessionId: z.string().uuid(), cwd: z.string(), items: z.array(timelineItemSchema) });
 type OpenInput = Extract<ProviderInput, { type: "session.open" }>;
 type Transport = Awaited<ReturnType<typeof createDroidTransport>>;
 export interface DroidDependencies {
@@ -57,6 +56,7 @@ export interface DroidDependencies {
   settingsTimeoutMs?: number;
   /** Internal test override; bounded startup snapshots require no extra RPC. */
   usageReplayDelaysMs?: readonly number[];
+  snapshotStore?: SnapshotStore;
 }
 const defaults: DroidDependencies = { createSession, resumeSession, listModels, transport: createDroidTransport };
 
@@ -87,6 +87,18 @@ export function createDroidProvider(deps: DroidDependencies = defaults): Provide
   };
 }
 
+type TurnOutcome = { state: "completed" | "failed" | "canceled"; error?: { message: string } };
+interface Turn {
+  id: string;
+  origin: "foreground" | "background";
+  nativeId?: string;
+  streamDone?: Promise<void>;
+  releaseStream?: () => void;
+  finished: Promise<void>;
+  releaseFinished: () => void;
+  outcome?: TurnOutcome;
+  finishing?: boolean;
+}
 interface Slot {
   id: string;
   config: ProviderSessionConfig;
@@ -114,6 +126,16 @@ interface Slot {
   contextModelId?: string;
   usageReplayTimers: Set<ReturnType<typeof setTimeout>>;
   textFlushTimer?: ReturnType<typeof setTimeout>;
+  turn?: Turn;
+  nextNativeTurnId?: string;
+  completedNativeTurns: Set<string>;
+  eventWork: Promise<void>;
+  saveWork: Promise<void>;
+  lastPersistence?: ProviderPersistence;
+  saveWarning: boolean;
+  unsubscribe?: () => void;
+  failed: boolean;
+  releaseEvents: () => void;
 }
 
 function connection(launch: ProviderLaunch, capabilities: readonly string[], deps: DroidDependencies): ProviderConnection {
@@ -123,6 +145,7 @@ function connection(launch: ProviderLaunch, capabilities: readonly string[], dep
   // later session inherit an old model list or multiplier indefinitely.
   const catalogs = new Map<string, Promise<ProviderCatalog>>();
   const catalogTransports = new Set<Transport>();
+  const snapshotStore = deps.snapshotStore ?? new FileSnapshotStore();
   let closed = false;
   function emit(event: ProviderEvent) {
     if (!closed) for (const listener of listeners) listener(event);
@@ -149,14 +172,159 @@ function connection(launch: ProviderLaunch, capabilities: readonly string[], dep
       flushText(slot);
     }, 50);
   }
-  function save(slot: Slot) {
-    if (!slot.native || !slot.config.persist || slot.savedRevision === slot.itemRevision) return;
-    const persistence = saved(slot);
-    slot.savedRevision = slot.itemRevision;
-    emit({ type: "session.persistence", sessionId: slot.id, persistence });
+  function persistenceWarning(slot: Slot) {
+    emit({ type: "session.notice", sessionId: slot.id, notice: {
+      id: "droid-persistence-write-failed", severity: "warning", title: "Droid timeline was not saved",
+      description: "The previous saved state is retained. Check the local snapshot storage and available disk space; saving will be retried at the next checkpoint.",
+    } });
   }
-  function saved(slot: Slot): ProviderPersistence {
-    return slot.persistenceBuilder.build(slot.native!.id, slot.native!.cwd ?? slot.config.cwd, slot.items);
+  async function save(slot: Slot, publish = true): Promise<ProviderPersistence | undefined> {
+    if (!slot.native || !slot.config.persist) return;
+    const revision = slot.itemRevision;
+    if (slot.savedRevision === revision) return slot.lastPersistence;
+    // Capture immutable row snapshots before waiting for another disk write.
+    const snapshot = slot.persistenceBuilder.build(slot.native.id, slot.config.cwd, slot.items);
+    const work = slot.saveWork.then(async () => {
+      if (slot.savedRevision >= revision) return;
+      try {
+        const persistence = await snapshotStore.save(snapshot, slot.lastPersistence);
+        slot.lastPersistence = persistence;
+        slot.savedRevision = revision;
+        slot.saveWarning = false;
+        if (publish) emit({ type: "session.persistence", sessionId: slot.id, persistence });
+      } catch {
+        if (!slot.saveWarning) {
+          slot.saveWarning = true;
+          if (publish) persistenceWarning(slot);
+        }
+      }
+    });
+    slot.saveWork = work;
+    await work;
+    return slot.lastPersistence;
+  }
+
+  function enqueue(slot: Slot, work: () => Promise<void> | void): Promise<void> {
+    slot.eventWork = slot.eventWork.then(work).catch(async () => {
+      await failRuntime(slot, new Error("Droid event processing failed"));
+    });
+    return slot.eventWork;
+  }
+  function beginTurn(slot: Slot, origin: Turn["origin"], controller = new AbortController()): Turn {
+    let releaseFinished!: () => void;
+    const finished = new Promise<void>((resolve) => { releaseFinished = resolve; });
+    const turn: Turn = { id: randomUUID(), origin, finished, releaseFinished };
+    if (origin === "foreground") {
+      turn.streamDone = new Promise<void>((resolve) => { turn.releaseStream = resolve; });
+    } else {
+      // A native background wakeup can race asynchronous attachment preparation.
+      slot.turnInput?.abort(new Error("Droid started background work; retry or steer the active turn."));
+      turn.nativeId = slot.nextNativeTurnId;
+    }
+    slot.nextNativeTurnId = undefined;
+    slot.turn = turn;
+    slot.turnInput = controller;
+    slot.activeTurnId = turn.id;
+    slot.busy = true;
+    if (origin === "background") emit({ type: "session.turn", sessionId: slot.id, turnId: turn.id, state: "started" });
+    return turn;
+  }
+  function rememberCompletion(slot: Slot, nativeId?: string) {
+    if (!nativeId) return;
+    slot.completedNativeTurns.add(nativeId);
+    if (slot.completedNativeTurns.size > 256) slot.completedNativeTurns.delete(slot.completedNativeTurns.values().next().value!);
+  }
+  async function finishTurn(slot: Slot, turn: Turn, outcome: TurnOutcome) {
+    if (slot.turn !== turn) return;
+    turn.finishing = true;
+    // SDK iterator cleanup must finish before the host is allowed to send again.
+    await turn.streamDone;
+    outcome = slot.closing || slot.interrupting ? { state: "canceled" } : turn.outcome ?? outcome;
+    flushText(slot);
+    for (const value of slot.timeline.finishTools(outcome.state)) item(slot, value);
+    slot.permissions.cancelAll();
+    slot.turnInput?.abort(new Error("Droid turn ended"));
+    await save(slot);
+    rememberCompletion(slot, turn.nativeId);
+    slot.timeline.release();
+    slot.turn = undefined;
+    slot.activeTurnId = undefined;
+    slot.busy = false;
+    emit({ type: "session.turn", sessionId: slot.id, turnId: turn.id, ...outcome });
+    turn.releaseFinished();
+    void refreshContext(slot);
+  }
+  function completionOutcome(completion: NativeCompletion): TurnOutcome {
+    if (completion.reason === "completed" || completion.reason === "spec_handoff") return { state: "completed" };
+    if (completion.reason === "cancelled" || completion.reason === "permission_rejected") return { state: "canceled" };
+    return { state: "failed", error: { message: `Droid turn ended: ${completion.reason}` } };
+  }
+  async function nativeUpdate(slot: Slot, update: NativeUpdate) {
+    if (slot.closing || closed || slot.failed) return;
+    if (update.type === "completion") {
+      const completion = update.completion;
+      if (completion.turnId && slot.completedNativeTurns.has(completion.turnId)) return;
+      let turn = slot.turn;
+      if (turn?.nativeId && completion.turnId && turn.nativeId !== completion.turnId) return;
+      if (!turn) {
+        // Empty autonomous turns can complete without a text/tool notification.
+        if (!completion.turnId) return;
+        slot.nextNativeTurnId = completion.turnId;
+        turn = beginTurn(slot, "background");
+      }
+      turn.nativeId ??= completion.turnId;
+      publishUsage(slot, {
+        inputTokens: completion.tokenUsage.inputTokens, outputTokens: completion.tokenUsage.outputTokens,
+        cachedInputTokens: completion.tokenUsage.cacheReadTokens,
+      }, turn.id);
+      await finishTurn(slot, turn, completionOutcome(completion));
+      return;
+    }
+    const event = update.message;
+    if (event.type === "user" && event.message.content.some((block) => block.type === "text")) {
+      if (!slot.turn) slot.nextNativeTurnId = event.message.id;
+      else if (slot.turn.origin === "foreground" && !slot.turn.nativeId && event.message.visibility !== "llm_only")
+        slot.turn.nativeId = event.message.id;
+    }
+    const work = event.type === "working_state_changed" ? event.state !== "idle"
+      : event.type === "assistant_text_delta" || event.type === "thinking_text_delta" || event.type === "assistant" ||
+        event.type === "tool_call" || event.type === "tool_call_delta";
+    if (work && !slot.turn) beginTurn(slot, "background");
+    for (const value of slot.timeline.handle(event)) item(slot, value);
+    scheduleTextFlush(slot);
+    if (event.type === "settings_updated") {
+      emit({ type: "session.config", sessionId: slot.id, config: configState(slot.native!, slot.catalog) });
+      void refreshContext(slot);
+    }
+    if (event.type === "token_usage_update") publishUsage(slot, {
+      inputTokens: event.inputTokens, outputTokens: event.outputTokens, cachedInputTokens: event.cacheReadTokens,
+    }, slot.activeTurnId);
+  }
+  async function failRuntime(slot: Slot, error: Error) {
+    if (slot.closing || slot.failed || closed) return;
+    slot.failed = true;
+    slot.unsubscribe?.();
+    slot.unsubscribe = undefined;
+    cancelTextFlush(slot);
+    cancelUsageReplays(slot);
+    slot.permissions.cancelAll();
+    slot.turnInput?.abort(error);
+    slot.steering?.cancelPending(error);
+    await slot.transport?.close();
+    if (slot.turn) await finishTurn(slot, slot.turn, { state: "failed", error: { message: error.message } });
+    emit({ type: "session.runtime_failed", sessionId: slot.id, error: { message: error.message } });
+  }
+  function watchTransport(slot: Slot, transport: Transport): Transport {
+    return {
+      get isConnected() { return transport.isConnected; },
+      send: (value) => transport.send(value), onMessage: (handler) => transport.onMessage(handler), close: () => transport.close(),
+      onError(handler) { transport.onError((error) => {
+        try { handler(error); }
+        finally {
+          if (!slot.closing && !closed) void enqueue(slot, () => failRuntime(slot, new Error("Droid process connection failed; reopen the session to continue.")));
+        }
+      }); },
+    };
   }
   function publishUsage(slot: Slot, update: ProviderUsage, turnId?: string) {
     // Paseo replaces lastUsage rather than merging patches. Keep context and
@@ -228,17 +396,20 @@ function connection(launch: ProviderLaunch, capabilities: readonly string[], dep
   }
   async function open(input: OpenInput) {
     if (sessions.has(input.sessionId)) throw new Error("Session already open");
+    let releaseEvents!: () => void;
+    const opened = new Promise<void>((resolve) => { releaseEvents = resolve; });
     const slot: Slot = {
       id: input.sessionId, config: input.config, busy: false, interrupting: false, steerWork: Promise.resolve(), closing: false, lifetime: new AbortController(),
       permissions: new Permissions(input.sessionId, emit, input.config.toolPolicy),
       timeline: new DroidTimeline(), items: new Map(), catalog: { models: [], modes: [] }, usage: {}, contextRevision: 0, usageReplayTimers: new Set(),
       persistenceBuilder: new TimelinePersistence(), itemRevision: 0, savedRevision: -1,
+      eventWork: opened, releaseEvents, saveWork: Promise.resolve(), completedNativeTurns: new Set(), saveWarning: false, failed: false,
+      lastPersistence: input.persistence,
     };
     sessions.set(slot.id, slot);
     slot.opening = (async () => {
       const options = optionsSchema.parse(input.config.providerOptions ?? {});
-      const persistence = input.persistence ? persistenceSchema.parse(input.persistence.data) : undefined;
-      if (input.persistence && input.persistence.version !== 1) throw new Error("Unsupported Droid persistence version");
+      const persistence = input.persistence ? await snapshotStore.load(input.persistence) : undefined;
       if (persistence && persistence.cwd !== input.config.cwd) throw new Error("Resume must use the original Droid working directory");
       // A close cancels only this wait, not another session's shared query.
       let abortCatalog: (() => void) | undefined;
@@ -259,6 +430,7 @@ function connection(launch: ProviderLaunch, capabilities: readonly string[], dep
         throw new Error(`Droid model "${input.config.model}" is unavailable in the refreshed catalog. Choose an available model and retry.`);
       slot.transport = await deps.transport(launch, { cwd: input.config.cwd, env: { ...input.config.env } });
       if (closed || slot.closing) { await slot.transport.close(); throw new Error("Session closed while opening"); }
+      slot.transport = watchTransport(slot, slot.transport);
       slot.transport = createPermissionCompatibilityTransport(slot.transport, slot.permissions.scriptPermissionHandler).transport;
       slot.steering = (deps.steering ?? createSteeringTransport)(slot.transport);
       slot.transport = slot.steering.transport;
@@ -278,29 +450,38 @@ function connection(launch: ProviderLaunch, capabilities: readonly string[], dep
             systemPrompt: input.config.systemPrompt ? { type: "preset", preset: "droid", append: input.config.systemPrompt } : undefined,
           }));
         if (closed || slot.closing) throw new Error("Session closed while opening");
+        slot.unsubscribe = observeSession(slot.native, (update) => { void enqueue(slot, () => nativeUpdate(slot, update)); });
         if (persistence) {
           await withDroidDeadline(slot.transport, () => slot.native!.updateSettings({ modelId: input.config.model, reasoningEffort: reasoning(input.config.thinkingOption), ...modeSettings(input.config.mode) }));
           for (const value of persistence.items) slot.items.set(value.id, value);
         }
         if (closed || slot.closing) throw new Error("Session closed while opening");
-        emit({ type: "session.opened", requestId: input.requestId, sessionId: slot.id, capabilities, restoration: "core", cwd: slot.native.cwd ?? slot.config.cwd,
-          ...(slot.config.persist ? { persistence: saved(slot) } : {}) });
+        // A first empty handle still preserves the native identity if disk is full.
+        slot.lastPersistence ??= { version: 1, data: { nativeSessionId: slot.native.id, cwd: slot.native.cwd ?? slot.config.cwd, items: [] } };
+        const initialPersistence = await save(slot, false);
+        emit({ type: "session.opened", requestId: input.requestId, sessionId: slot.id, capabilities, restoration: "core", cwd: slot.config.cwd,
+          ...(slot.config.persist ? { persistence: initialPersistence } : {}) });
         if (input.history === "replay") for (const value of slot.items.values()) emit({ type: "timeline.item", sessionId: slot.id, item: value });
         emit({ type: "session.config", sessionId: slot.id, config: configState(slot.native, slot.catalog) });
         void refreshContext(slot);
         emit({ type: "session.ready", requestId: input.requestId, sessionId: slot.id });
+        if (slot.saveWarning) persistenceWarning(slot);
         scheduleUsageReplays(slot);
       } catch (error) {
+        slot.closing = true;
+        slot.unsubscribe?.();
+        slot.unsubscribe = undefined;
         await slot.transport.close();
         throw error;
       }
     })();
     try { await slot.opening; }
     catch (error) { if (sessions.get(slot.id) === slot) sessions.delete(slot.id); slot.permissions.close(); throw error; }
+    finally { slot.releaseEvents(); }
   }
   function get(id: string): Slot & { native: DroidSession } {
     const slot = sessions.get(id);
-    if (!slot?.native || slot.closing) throw new Error("Droid session is not ready");
+    if (!slot?.native || slot.closing || slot.failed) throw new Error("Droid session is not ready; reopen it to continue");
     return slot as Slot & { native: DroidSession };
   }
   function assertImageSupport(slot: Slot & { native: DroidSession }, prepared: PreparedPrompt) {
@@ -313,14 +494,14 @@ function connection(launch: ProviderLaunch, capabilities: readonly string[], dep
       throw new Error("Resolve the pending Droid tool approval before steering. To abandon that action, stop the turn and send a new message.");
   }
   async function steer(slot: Slot & { native: DroidSession }, request: ProviderPrompt, expectedTurnId: string) {
-    if (!slot.busy || slot.activeTurnId !== expectedTurnId || slot.interrupting || slot.closing)
+    if (!slot.busy || slot.activeTurnId !== expectedTurnId || slot.turn?.finishing || slot.interrupting || slot.closing)
       throw new Error("The active Droid turn has ended; send the message again to start a new turn.");
     assertSteeringToolAdmission(slot, request);
     const signal = slot.turnInput!.signal;
     const prepared = await (deps.preparePrompt ?? preparePrompt)(request, { cwd: slot.config.cwd, signal });
     assertImageSupport(slot, prepared);
     signal.throwIfAborted();
-    if (!slot.busy || slot.activeTurnId !== expectedTurnId || slot.interrupting || slot.closing)
+    if (!slot.busy || slot.activeTurnId !== expectedTurnId || slot.turn?.finishing || slot.interrupting || slot.closing)
       throw new Error("The active Droid turn ended while preparing this message; send it again.");
     assertSteeringToolAdmission(slot, request);
     // Only an acknowledged update is a sent user message. A missing ACK is
@@ -330,15 +511,15 @@ function connection(launch: ProviderLaunch, capabilities: readonly string[], dep
       if (!(error instanceof SteeringRejectedError)) {
         item(slot, { type: "notification", id: `paseo:steer-unconfirmed:${request.clientMessageId}`, level: "warning",
           message: `Droid did not acknowledge this steering update. Delivery is unconfirmed; it may already be in native history.\n\n${prepared.timelineText}` });
-        save(slot);
+        await save(slot);
       }
       if (!(error instanceof SteeringRejectedError) && slot.activeTurnId !== expectedTurnId && !slot.interrupting && !slot.closing)
         throw new Error("The Droid turn ended before steering was acknowledged. The message may already be in Droid history; send a new prompt to continue.");
       throw error;
     }
     item(slot, { type: "user_message", id: `paseo:user:${request.clientMessageId}`, clientMessageId: request.clientMessageId, text: prepared.timelineText });
-    if (!slot.busy || slot.activeTurnId !== expectedTurnId || slot.interrupting || slot.closing) {
-      save(slot);
+    if (!slot.busy || slot.activeTurnId !== expectedTurnId || slot.turn?.finishing || slot.interrupting || slot.closing) {
+      await save(slot);
       throw new Error("The Droid turn ended while sending steering. The message is retained in Droid history; send a new prompt to continue.");
     }
     // A native AskUser cancellation terminates Droid's loop. Answer it with the
@@ -355,9 +536,13 @@ function connection(launch: ProviderLaunch, capabilities: readonly string[], dep
       });
     }
     emit({ type: "session.prompt_result", sessionId: slot.id, clientMessageId: request.clientMessageId, result: { type: "steer", turnId: expectedTurnId } });
-    save(slot);
+    await save(slot);
   }
   async function prompt(slot: Slot & { native: DroidSession }, request: ProviderPrompt) {
+    // Drain already received native wakeups before deciding whether a new prompt
+    // is admissible. This also closes the foreground/background handoff gap.
+    await slot.eventWork;
+    if (slot.closing || slot.failed || closed || sessions.get(slot.id) !== slot) throw new Error("Droid session is not ready; reopen it to continue");
     if (request.delivery === "steer") {
       if (!slot.busy || !slot.activeTurnId || slot.interrupting) throw new Error("There is no active Droid turn to steer.");
       const expectedTurnId = slot.activeTurnId;
@@ -373,67 +558,51 @@ function connection(launch: ProviderLaunch, capabilities: readonly string[], dep
     try {
       prepared = await (deps.preparePrompt ?? preparePrompt)(request, { cwd: slot.config.cwd, signal: turnInput.signal });
       turnInput.signal.throwIfAborted();
-      if (slot.closing || closed) throw new Error("Droid session closed while preparing the message");
+      if (slot.closing || slot.failed || closed) throw new Error("Droid session closed while preparing the message");
       assertImageSupport(slot, prepared);
     } catch (error) {
-      slot.busy = false;
+      slot.busy = !!slot.turn;
       turnInput.abort();
       throw error;
     }
-    const turnId = randomUUID();
-    slot.activeTurnId = turnId;
+    turnInput.signal.throwIfAborted();
+    if (slot.turn) throw new Error("Droid started background work; steer it or retry after completion.");
+    const turn = beginTurn(slot, "foreground", turnInput);
+    const turnId = turn.id;
     item(slot, { type: "user_message", id: `paseo:user:${request.clientMessageId}`, clientMessageId: request.clientMessageId, text: prepared.timelineText });
     emit({ type: "session.prompt_result", sessionId: slot.id, clientMessageId: request.clientMessageId, result: { type: "turn", turnId } });
     emit({ type: "session.turn", sessionId: slot.id, turnId, state: "started" });
     let terminal = false;
-    let outcome: { state: "completed" | "failed" | "canceled"; error?: { message: string } } | undefined;
     slot.task = (async () => {
       try {
         for await (const event of slot.native.stream(prepared.text, { includePartialMessages: true, ...prepared.options })) {
           if (slot.closing || closed) break;
-          for (const value of slot.timeline.handle(event)) item(slot, value);
-          scheduleTextFlush(slot);
-          if (event.type === "settings_updated") {
-            emit({ type: "session.config", sessionId: slot.id, config: configState(slot.native, slot.catalog) });
-            void refreshContext(slot);
-          }
+          // Lifetime notifications own the timeline. Folding stream copies too
+          // would duplicate deltas and lose events after this iterator ends.
           if (event.type !== "result") continue;
           terminal = true;
           const state = event.success ? "completed" : event.subtype === "interrupted" ? "canceled" : "failed";
-          flushText(slot);
-          for (const value of slot.timeline.finishTools(state === "completed" ? "completed" : state === "canceled" ? "canceled" : "failed")) item(slot, value);
-          if (event.tokenUsage) publishUsage(slot, {
-            inputTokens: event.tokenUsage.inputTokens, outputTokens: event.tokenUsage.outputTokens,
-            cachedInputTokens: event.tokenUsage.cacheReadTokens,
-          }, turnId);
-          outcome = { state, ...(state === "failed" ? { error: { message: event.error?.message ?? "Droid turn failed" } } : {}) };
+          turn.outcome = { state, ...(state === "failed" ? { error: { message: event.error?.message ?? "Droid turn failed" } } : {}) };
           break;
         }
         if (!terminal) throw new Error(slot.closing ? "Droid session closed" : "Droid stream ended without a result");
       } catch (error) {
         if (!terminal) {
-          flushText(slot);
-          for (const value of slot.timeline.finishTools(slot.closing || slot.interrupting ? "canceled" : "failed")) item(slot, value);
-          outcome = { state: slot.closing || slot.interrupting ? "canceled" : "failed", error: { message: message(error) } };
+          turn.outcome = { state: slot.closing || slot.interrupting ? "canceled" : "failed", error: { message: message(error) } };
         }
       } finally {
-        flushText(slot);
-        slot.permissions.cancelAll();
-        turnInput.abort(new Error("Droid turn ended"));
-        slot.activeTurnId = undefined;
-        slot.busy = false;
-        save(slot);
-        slot.timeline.release();
-        // Commit persistence and finish native generator cleanup before the
-        // terminal event lets the host capture its handle or start another turn.
-        if (outcome) emit({ type: "session.turn", sessionId: slot.id, turnId, ...outcome });
-        void refreshContext(slot);
+        turn.releaseStream!();
+        // Handles stream/transport errors without an agent_turn_completed event.
+        void enqueue(slot, () => finishTurn(slot, turn, turn.outcome ?? { state: "failed", error: { message: "Droid stream ended without a result" } }));
+        await turn.finished;
       }
     })();
     await slot.task;
   }
   async function closeSlot(slot: Slot) {
     slot.closing = true;
+    slot.unsubscribe?.();
+    slot.unsubscribe = undefined;
     cancelTextFlush(slot);
     cancelUsageReplays(slot);
     slot.permissions.close();
@@ -445,6 +614,8 @@ function connection(launch: ProviderLaunch, capabilities: readonly string[], dep
     await slot.opening?.catch(() => {});
     await slot.native?.close().catch(() => {});
     await slot.task;
+    await enqueue(slot, async () => { if (slot.turn) await finishTurn(slot, slot.turn, { state: "canceled" }); });
+    await slot.saveWork;
     if (sessions.get(slot.id) === slot) sessions.delete(slot.id);
   }
   async function dispatch(input: ProviderInput) {
@@ -460,7 +631,11 @@ function connection(launch: ProviderLaunch, capabilities: readonly string[], dep
         slot.turnInput?.abort(new Error("Droid turn interrupted"));
         slot.steering?.cancelPending(new Error("Droid turn interrupted"));
         slot.permissions.cancelAll();
-        try { await withDroidDeadline(slot.transport!, async () => { await slot.native.interrupt(); await slot.task; }, 10000); }
+        try { await withDroidDeadline(slot.transport!, async () => {
+          await slot.native.interrupt();
+          await slot.task;
+          await enqueue(slot, async () => { if (slot.turn) await finishTurn(slot, slot.turn, { state: "canceled" }); });
+        }, 10000); }
         finally { slot.interrupting = false; }
         break;
       }
@@ -477,7 +652,7 @@ function connection(launch: ProviderLaunch, capabilities: readonly string[], dep
         }
         emit({ type: "session.config", sessionId: slot.id, config: configState(slot.native, slot.catalog) });
         void refreshContext(slot);
-        save(slot);
+        await save(slot);
         break;
       }
       case "session.close": {

@@ -1,5 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { randomUUID } from "node:crypto";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   AutonomyLevel,
   ContextStatsAccuracy,
@@ -8,6 +12,7 @@ import {
   RequestPermissionRequestParamsSchema,
   ToolConfirmationOutcome,
   ToolConfirmationType,
+  SessionNotificationPayloadSchema,
   type AskUserResult,
   type ClientAskUserHandler,
   type ClientPermissionHandler,
@@ -29,6 +34,7 @@ import {
 import { createDroidProvider, supported, type DroidDependencies } from "./provider";
 import { preparePrompt, type PreparedPrompt } from "./attachments";
 import { SteeringRejectedError, type SteeringOptions } from "./steering";
+import { FileSnapshotStore, type SnapshotStore } from "./snapshot-store";
 
 const cwd = "/tmp/droid-provider-tests";
 const nativeId = "68c0cb90-4209-49e2-a7e7-f1d4fc1e49fb";
@@ -47,11 +53,13 @@ class FakeTransport implements StringFramedDroidClientTransport {
   readonly onClose = new Set<() => void>();
   async send() {}
   onMessage() {}
-  onError() {}
+  errorHandler?: (error: Error) => void;
+  onError(handler: (error: Error) => void) { this.errorHandler = handler; }
   async close() {
     this.closeCalls++;
     if (!this.isConnected) return;
     this.isConnected = false;
+    this.errorHandler?.(new Error("Fake Droid transport closed"));
     for (const callback of this.onClose) callback();
   }
 }
@@ -75,14 +83,54 @@ class FakeNative {
   readonly streamInputs: Array<{ text: string; options?: MessageOptions }> = [];
   readonly onInterrupt = new Set<() => void>();
   readonly onShutdown = new Set<() => void>();
-  constructor(readonly options: NativeOptions, private readonly script: Script, private readonly context?: (native: FakeNative) => Promise<GetContextStatsResult>) {
+  readonly notifications = new Set<(notification: Record<string, unknown>) => void>();
+  readonly nativeTurnIds: string[] = [];
+  onNotification(callback: (notification: Record<string, unknown>) => void) {
+    this.notifications.add(callback);
+    this.afterSubscribe?.(this);
+    return () => { this.notifications.delete(callback); };
+  }
+  notify(payload: unknown) {
+    const parsed = SessionNotificationPayloadSchema.safeParse(payload);
+    assert.ok(parsed.success, parsed.success ? "" : parsed.error.message);
+    for (const callback of this.notifications) callback({ params: { notification: parsed.data } });
+  }
+  notifyMessage(event: DroidMessage, turnId: string) {
+    if (event.type === "result") {
+      this.notify({ type: "agent_turn_completed", reason: event.success ? "completed" : "cancelled", turnId,
+        tokenUsage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, thinkingTokens: 0, ...event.tokenUsage } });
+    } else if (event.type === "assistant_text_delta" || event.type === "thinking_text_delta") {
+      this.notify({ ...event, textDelta: event.text });
+    } else if (event.type === "tool_call") {
+      this.notify({ type: "tool_call", toolUse: { type: "tool_use", id: event.toolUseId, name: event.name, input: event.input } });
+    } else if (event.type === "tool_result") {
+      this.notify({ ...event, messageId: randomUUID() });
+    } else if (event.type === "assistant" || event.type === "user") {
+      this.notify({ type: "create_message", message: { ...event.message, createdAt: event.message.createdAt ?? 0, updatedAt: event.message.updatedAt ?? 0 } });
+    } else if (event.type === "tool_progress") {
+      this.notify({ type: "tool_progress_update", toolUseId: event.toolUseId, toolName: event.toolName, update: event.update });
+    } else if (event.type === "working_state_changed") {
+      this.notify({ type: "droid_working_state_changed", newState: event.state });
+    } else if (event.type === "token_usage_update") {
+      this.notify({ type: "session_token_usage_changed", tokenUsage: { ...event, cacheCreationTokens: event.cacheCreationTokens ?? 0, thinkingTokens: event.thinkingTokens ?? 0 } });
+    } else if (event.type === "error") {
+      this.notify({ ...event, errorType: "Error" });
+    } else this.notify(event);
+  }
+  constructor(readonly options: NativeOptions, private readonly script: Script, private readonly context?: (native: FakeNative) => Promise<GetContextStatsResult>, private readonly afterSubscribe?: (native: FakeNative) => void) {
     options.transport.onError(() => { for (const callback of this.onShutdown) callback(); });
   }
   async *stream(text: string, options?: MessageOptions) {
     this.streamCalls++;
     this.streamInputs.push({ text, options });
     this.interrupted = false;
-    yield* this.script(this, text);
+    const turnId = randomUUID();
+    this.nativeTurnIds.push(turnId);
+    this.notify({ type: "create_message", message: { id: turnId, role: "user", content: [{ type: "text", text }], createdAt: 0, updatedAt: 0 } });
+    for await (const event of this.script(this, text)) {
+      this.notifyMessage(event, turnId);
+      yield event;
+    }
   }
   async interrupt() {
     this.interruptCalls++;
@@ -143,10 +191,14 @@ interface SetupOptions {
   contextTimeoutMs?: number;
   settingsTimeoutMs?: number;
   usageReplayDelaysMs?: readonly number[];
+  snapshotStore?: SnapshotStore;
+  afterSubscribe?: (native: FakeNative) => void;
   catalog?: (call: number, env: Readonly<Record<string, string>>, cwd?: string) => Promise<ModelInfo[]>;
 }
 
 async function setup(script: Script = successful, gates: SetupOptions = {}) {
+  const directory = await mkdtemp(join(tmpdir(), "droid-provider-state-"));
+  const snapshotStore = gates.snapshotStore ?? new FileSnapshotStore(directory);
   const transports: FakeTransport[] = [];
   const transportOptions = new Map<FakeTransport, { cwd?: string; env?: Readonly<Record<string, string>> }>();
   let catalogCalls = 0;
@@ -159,6 +211,7 @@ async function setup(script: Script = successful, gates: SetupOptions = {}) {
   const steerCancellations: Array<Error | undefined> = [];
   const sends = new Map<string, Promise<void>>();
   const deps = {
+    snapshotStore,
     async transport(_launch: unknown, options: { cwd?: string; env?: Readonly<Record<string, string>> } = {}) {
       const transport = new FakeTransport();
       transports.push(transport);
@@ -184,13 +237,13 @@ async function setup(script: Script = successful, gates: SetupOptions = {}) {
         options.transport.onError(() => gates.create!.reject(new Error("Initialization transport closed")));
         await gates.create.promise;
       }
-      const native = new FakeNative(options, script, gates.context);
+      const native = new FakeNative(options, script, gates.context, gates.afterSubscribe);
       natives.push(native);
       return native as unknown as DroidSession;
     },
     async resumeSession(id: string, options: NativeOptions) {
       resumed.push(id);
-      const native = new FakeNative(options, script, gates.context);
+      const native = new FakeNative(options, script, gates.context, gates.afterSubscribe);
       natives.push(native);
       return native as unknown as DroidSession;
     },
@@ -231,7 +284,7 @@ async function setup(script: Script = successful, gates: SetupOptions = {}) {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         waiters.delete(check);
-        reject(new Error(`Timed out waiting for ${type}; received ${events.map((event) => event.type).join(", ")}`));
+        reject(new Error(`Timed out waiting for ${type}; received ${events.map((event) => event.type === "session.turn" ? `${event.type}:${event.state}:${event.error?.message ?? ""}` : event.type).join(", ")}`));
       }, 1500);
       const check = () => {
         const event = events.slice(after).find((candidate) => candidate.type === type && predicate(candidate as Extract<ProviderEvent, { type: T }>));
@@ -280,9 +333,10 @@ async function setup(script: Script = successful, gates: SetupOptions = {}) {
   }
   async function cleanup() {
     await connection.close();
+    await rm(directory, { recursive: true, force: true });
     assert.deepEqual(invalid, [], "Every emitted event must satisfy the Paseo provider protocol");
   }
-  return { connection, events, waitFor, config, open, prompt, sendPrompt, sent, rejectedSteer, terminalTurns, cleanup, transports, natives, resumed, createStarted, modelsStarted, steerCalls, steerStarted, steerCancellations, catalogCalls: () => catalogCalls };
+  return { connection, events, waitFor, config, open, prompt, sendPrompt, sent, rejectedSteer, terminalTurns, cleanup, transports, natives, resumed, snapshotStore, createStarted, modelsStarted, steerCalls, steerStarted, steerCancellations, catalogCalls: () => catalogCalls };
 }
 
 function catalogModel(tokenMultiplier: number, id = "test-model"): ModelInfo {
@@ -552,6 +606,7 @@ test("failed, invalid and timed-out context telemetry never fails a turn or clos
       await h.open();
       await h.prompt();
       await h.waitFor("session.persistence");
+      await h.waitFor("session.turn", (event) => event.state === "completed");
       await h.connection.send({ type: "session.configure", requestId: `configure:${mode}`, sessionId: "session", changes: { mode: "spec" } });
       await h.waitFor("request.completed", (event) => event.requestId === `configure:${mode}`);
       if (mode === "timeout") await new Promise<void>((resolve) => setTimeout(resolve, 25));
@@ -596,7 +651,9 @@ test("a late usage observer receives bounded cached startup snapshots without ad
     // both the native context response and the first turn's usage events.
     h.connection.onEvent((event) => { if (event.type === "session.usage") late.push(event); });
     await new Promise<void>((resolve) => setTimeout(resolve, 100));
-    assert.equal(late.length, 3, "Replay must stop after the bounded startup deliveries");
+    assert.ok(late.length > 0 && late.length <= 3, "A late subscriber receives only the startup deliveries that remain");
+    assert.equal(h.events.filter((event) => event.type === "session.usage" && event.turnId === undefined).length, 5,
+      "Two context snapshots plus exactly three startup replays, independent of disk timing");
     assert.ok(late.every((event) => event.turnId === undefined));
     assert.ok(late.every((event) => JSON.stringify(event.usage) === JSON.stringify({
       contextWindowMaxTokens: 128000, contextWindowUsedTokens: 1100,
@@ -656,6 +713,7 @@ test("native permission cards unblock the active turn and a concurrent prompt is
     await h.connection.send({ type: "session.permission", sessionId: "session", permissionId: permission.request.id,
       response: { behavior: "allow", selectedActionId: ToolConfirmationOutcome.ProceedOnce } });
     await h.waitFor("session.persistence");
+    await h.waitFor("session.turn", (event) => event.state === "completed");
     assert.equal(h.terminalTurns().length, 1);
     assert.equal((h.terminalTurns()[0] as Extract<ProviderEvent, { type: "session.turn" }>).state, "completed");
     assert.equal(h.events.filter((event) => event.type === "session.prompt_result" && event.clientMessageId === "message-1").length, 1);
@@ -687,6 +745,7 @@ test("interrupt settles a pending permission and emits one canceled terminal wit
     const next = await h.waitFor("session.permission", () => true, after);
     await h.connection.send({ type: "session.permission", sessionId: "session", permissionId: next.request.id, response: { behavior: "allow" } });
     await h.waitFor("session.persistence", () => true, after);
+    await h.waitFor("session.turn", (event) => event.state === "completed", after);
     assert.equal(h.terminalTurns().length, 2);
   } finally { await h.cleanup(); }
 });
@@ -701,6 +760,7 @@ test("stream errors after acceptance produce one failed terminal, and post-resul
       await h.open();
       await h.prompt();
       await h.waitFor("session.persistence");
+      await h.waitFor("session.turn", (event) => event.state !== "started");
       assert.equal(h.events.filter((event) => event.type === "session.prompt_result").length, 1);
       assert.equal(h.terminalTurns().length, 1);
       assert.equal((h.terminalTurns()[0] as Extract<ProviderEvent, { type: "session.turn" }>).state, afterResult ? "completed" : "failed");
@@ -714,7 +774,7 @@ test("completed-turn persistence restores final snapshots after close and reopen
     await h.open();
     await h.prompt();
     const saved = await h.waitFor("session.persistence");
-    const snapshots = (saved.persistence.data as { items: unknown[] }).items;
+    const snapshots = (await h.snapshotStore.load(saved.persistence)).items;
     assert.equal(snapshots.length, 2, "Persistence contains one user row and one final assistant row");
     assert.equal((snapshots[1] as { text: string }).text, "Hello from Droid");
     await h.connection.send({ type: "session.close", requestId: "close", sessionId: "session" });
@@ -856,7 +916,7 @@ test("native image and document options reach initial stream and steering while 
     assert.deepEqual(h.steerCalls[0].options?.files, input.options?.files);
     assert.equal(h.natives[0].streamCalls, 1);
     const persisted = await h.waitFor("session.persistence");
-    const rendered = JSON.stringify(persisted.persistence.data);
+    const rendered = JSON.stringify(await h.snapshotStore.load(persisted.persistence));
     assert.match(rendered, /Attachment 1: image 1/);
     assert.match(rendered, /brief\.txt/);
     assert.ok(!rendered.includes(pngBase64), "Binary image data must stay out of persisted timeline rows");
@@ -1118,7 +1178,7 @@ test("a rejected steering update retains the pending AskUser even when clearing 
       response: { behavior: "allow", updatedInput: { answers: { Direction: "Review" } } } });
     await h.waitFor("session.turn", (event) => event.state === "completed");
     const saved = await h.waitFor("session.persistence");
-    assert.ok(!JSON.stringify(saved.persistence).includes("Supersede the question"), "A definitively rejected message must not be persisted as delivered or uncertain");
+    assert.ok(!JSON.stringify(await h.snapshotStore.load(saved.persistence)).includes("Supersede the question"), "A definitively rejected message must not be persisted as delivered or uncertain");
     assert.equal(h.events.filter((event) => event.type === "timeline.item" && event.item.type === "user_message" && event.item.clientMessageId === "failed-clearing-steer").length, 0);
     assert.equal(turn.answers[0]?.answers[0]?.answer, "Review", "The original card must remain answerable after steering fails");
     assert.notEqual(turn.answers[0]?.cancelled, true);
@@ -1173,6 +1233,7 @@ test("an old steering ACK cannot clear a question created by a replacement turn"
     await h.steerStarted.promise;
     finishFirst.resolve();
     await h.waitFor("session.persistence");
+    await h.waitFor("session.turn", (event) => event.state === "completed");
     const after = h.events.length;
     await h.prompt("replacement-turn");
     const replacementQuestion = await h.waitFor("session.permission", () => true, after);
@@ -1379,7 +1440,7 @@ test("an uncertain steering ACK is persisted as a warning rather than a sent mes
     assert.ok(notice);
     assert.equal(h.events.filter((event) => event.type === "timeline.item" && event.item.type === "user_message" && event.item.clientMessageId === "uncertain-steer").length, 0);
     const saved = await h.waitFor("session.persistence");
-    assert.match(JSON.stringify(saved.persistence), /Delivery is unconfirmed/);
+    assert.match(JSON.stringify(await h.snapshotStore.load(saved.persistence)), /Delivery is unconfirmed/);
     assert.equal(h.natives[0].interruptCalls, 0);
   } finally { turn.release.resolve(); await h.cleanup(); }
 });
@@ -1400,7 +1461,7 @@ test("a quiet stream flushes buffered text while active and ends with one final 
     assert.equal(h.terminalTurns().length, 0);
     gate.resolve();
     const saved = await h.waitFor("session.persistence");
-    const items = (saved.persistence.data as { items: Array<{ type: string; text?: string }> }).items;
+    const items = (await h.snapshotStore.load(saved.persistence)).items;
     assert.equal(items.find((item) => item.type === "assistant_message")?.text, "Visible before completion; final tail");
     const terminal = await h.waitFor("session.turn", (event) => event.state === "completed");
     assert.ok(h.events.indexOf(saved) < h.events.indexOf(terminal), "Persist the complete snapshot before the host captures a terminal session handle");
@@ -1459,7 +1520,7 @@ test("withdrawn text is cleared in persistence and is not republished on provide
     await h.waitFor("timeline.item", (event) => event.item.type === "assistant_message" && event.item.text === withdrawn);
     gate.resolve();
     const saved = await h.waitFor("session.persistence");
-    assert.equal(JSON.stringify(saved.persistence).includes(withdrawn), false);
+    assert.equal(JSON.stringify(await h.snapshotStore.load(saved.persistence)).includes(withdrawn), false);
     const notice = h.events.find((event) => event.type === "timeline.item" && event.item.type === "notification" && event.item.id === "droid:retracted:withdrawn-answer");
     assert.ok(notice, "Warn explicitly because Paseo 0.11.4 ignores empty text snapshots");
     await h.connection.send({ type: "session.close", requestId: "close-withdrawn", sessionId: "session" });
@@ -1471,4 +1532,290 @@ test("withdrawn text is cleared in persistence and is not republished on provide
     assert.ok(replay.some((event) => event.type === "timeline.item" && event.item.type === "assistant_message" && event.item.text === ""));
     assert.equal(h.natives[1].streamCalls, 0);
   } finally { gate.resolve(); await h.cleanup(); }
+});
+
+function backgroundStart(native: FakeNative, id = "execute-completion:background-test") {
+  native.notify({ type: "create_message", message: {
+    id, role: "user", visibility: "llm_only", content: [{ type: "text", text: "Background command finished" }], createdAt: 0, updatedAt: 0,
+  } });
+  native.notify({ type: "droid_working_state_changed", newState: "thinking" });
+}
+function backgroundComplete(native: FakeNative, id = "execute-completion:background-test", reason = "completed") {
+  native.notify({ type: "agent_turn_completed", turnId: id, reason,
+    tokenUsage: { inputTokens: 123, outputTokens: 45, cacheReadTokens: 100, cacheCreationTokens: 0, thinkingTokens: 5 } });
+}
+
+test("a background wakeup delivers 39 tool calls, Tasks and its full report without another prompt", async () => {
+  const h = await setup();
+  try {
+    await h.open(); await h.prompt();
+    await h.waitFor("session.turn", (e) => e.state === "completed");
+    const after = h.events.length;
+    const native = h.natives[0];
+    backgroundStart(native);
+    for (let i = 0; i < 39; i++) {
+      native.notify({ type: "tool_call", toolUse: { type: "tool_use", id: `background-tool:${i}`, name: i === 0 ? "TodoWrite" : "Read",
+        input: i === 0 ? { todos: "1. [completed] Review captured results" } : { file_path: `/test/result-${i}.txt` } } });
+      native.notify({ type: "tool_result", messageId: `tool-message:${i}`, toolUseId: `background-tool:${i}`, content: "Done", isError: false });
+    }
+    native.notify({ type: "assistant_text_delta", messageId: "background-report", blockIndex: 0, textDelta: "The complete " });
+    native.notify({ type: "assistant_text_delta", messageId: "background-report", blockIndex: 0, textDelta: "background review." });
+    native.notify({ type: "create_message", message: { id: "background-report", role: "assistant", content: [{ type: "text", text: "The complete background review." }], createdAt: 0, updatedAt: 0 } });
+    backgroundComplete(native);
+    backgroundComplete(native);
+    await h.waitFor("session.turn", (e) => e.state === "completed", after);
+    const started = h.events.slice(after).filter((e) => e.type === "session.turn" && e.state === "started");
+    assert.equal(started.length, 1);
+    assert.equal(h.terminalTurns().length, 2, "Duplicate native completion must not manufacture another turn");
+    assert.equal(native.streamCalls, 1);
+    assert.equal(h.events.slice(after).filter((e) => e.type === "session.prompt_result").length, 0);
+    assert.equal(h.events.slice(after).filter((e) => e.type === "timeline.item" && e.item.type === "user_message").length, 0);
+    const saved = await h.waitFor("session.persistence", () => true, after);
+    const snapshot = await h.snapshotStore.load(saved.persistence);
+    assert.equal(snapshot.items.filter((i) => i.type === "tool_call" && i.callId.startsWith("background-tool:")).length, 39);
+    assert.equal(snapshot.items.find((i) => i.id === "droid:todo")?.type, "todo");
+    assert.equal(snapshot.items.filter((i) => i.type === "assistant_message" && i.text === "The complete background review.").length, 1);
+    assert.ok(h.events.indexOf(saved) < h.events.findIndex((e, i) => i >= after && e.type === "session.turn" && e.state === "completed"));
+  } finally { await h.cleanup(); }
+});
+
+test("unrelated and duplicate native completions cannot finish a foreground turn", async () => {
+  const held = heldTurn();
+  const h = await setup(held.script);
+  try {
+    await h.open(); await h.prompt(); await held.started.promise;
+    backgroundComplete(h.natives[0], "unrelated-native-turn");
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(h.terminalTurns().length, 0);
+    held.release.resolve();
+    await h.waitFor("session.turn", (e) => e.state === "completed");
+    backgroundComplete(h.natives[0], h.natives[0].nativeTurnIds[0]);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(h.terminalTurns().length, 1);
+  } finally { held.release.resolve(); await h.cleanup(); }
+});
+
+test("background approvals and steering keep one native turn and preserve pending cards", async () => {
+  const h = await setup();
+  try {
+    await h.open();
+    backgroundStart(h.natives[0]);
+    await h.waitFor("session.turn", (e) => e.state === "started");
+    const answer = requestToolApproval(h.natives[0], "background-approval");
+    const permission = await h.waitFor("session.permission");
+    await h.sendPrompt("background-steer", [{ type: "text", text: "Use the updated requirement" }], "steer");
+    await h.sent("background-steer");
+    const accepted = await h.waitFor("session.prompt_result");
+    assert.equal(accepted.result.type, "steer");
+    assert.equal(h.events.filter((e) => e.type === "session.permission_resolved").length, 0);
+    await h.connection.send({ type: "session.permission", sessionId: "session", permissionId: permission.request.id,
+      response: { behavior: "allow", selectedActionId: ToolConfirmationOutcome.ProceedOnce } });
+    assert.equal(await answer, ToolConfirmationOutcome.ProceedOnce);
+    backgroundComplete(h.natives[0]);
+    await h.waitFor("session.turn", (e) => e.state === "completed");
+    assert.equal(h.natives[0].streamCalls, 0);
+    assert.equal(h.steerCalls.length, 1);
+    assert.equal(h.terminalTurns().length, 1);
+  } finally { await h.cleanup(); }
+});
+
+test("Stop cancels an autonomous AskUser turn and closing removes its observer", async () => {
+  const h = await setup();
+  try {
+    await h.open(); backgroundStart(h.natives[0]);
+    await h.waitFor("session.turn", (e) => e.state === "started");
+    const question = h.natives[0].options.askUserHandler(AskUserRequestParamsSchema.parse({ toolCallId: "background-question",
+      questions: [{ index: 0, topic: "Next step", question: "Continue?", options: ["Yes"] }] }));
+    await h.waitFor("session.permission");
+    await h.connection.send({ type: "session.interrupt", requestId: "stop-background", sessionId: "session" });
+    await h.waitFor("request.completed", (e) => e.requestId === "stop-background");
+    await question;
+    assert.equal(h.terminalTurns().length, 1);
+    assert.equal((h.terminalTurns()[0] as Extract<ProviderEvent, { type: "session.turn" }>).state, "canceled");
+    const captured = [...h.natives[0].notifications];
+    await h.connection.send({ type: "session.close", requestId: "close-background", sessionId: "session" });
+    await h.waitFor("request.completed", (e) => e.requestId === "close-background");
+    assert.equal(h.natives[0].notifications.size, 0);
+    const after = h.events.length;
+    for (const callback of captured) callback({ params: { notification: { type: "assistant_text_delta", messageId: "late", blockIndex: 0, textDelta: "Must stay closed" } } });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(h.events.length, after);
+    assert.equal(h.natives[0].streamCalls, 0);
+  } finally { await h.cleanup(); }
+});
+
+test("an idle/background transport failure fails its turn once and removes the observer", async () => {
+  const h = await setup();
+  try {
+    await h.open(); backgroundStart(h.natives[0]);
+    await h.waitFor("session.turn", (e) => e.state === "started");
+    h.natives[0].notify({ type: "tool_call", toolUse: { type: "tool_use", id: "failed-background-read", name: "Read", input: { file_path: "/test/file.txt" } } });
+    await h.transports.at(-1)!.close();
+    await h.waitFor("session.runtime_failed");
+    assert.equal(h.terminalTurns().length, 1);
+    assert.equal((h.terminalTurns()[0] as Extract<ProviderEvent, { type: "session.turn" }>).state, "failed");
+    assert.equal(h.natives[0].notifications.size, 0);
+    await h.prompt("after-background-failure");
+    const refused = await h.waitFor("session.prompt_result");
+    assert.equal(refused.result.type, "failed");
+    assert.equal(h.natives[0].streamCalls, 0);
+  } finally { await h.cleanup(); }
+});
+
+test("checkpoint write failures retain the prior handle, warn once, complete the turn and recover", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "droid-provider-disk-failure-"));
+  const store = new FileSnapshotStore(directory);
+  let fail = false;
+  const h = await setup(successful, { snapshotStore: {
+    load: (value) => store.load(value),
+    save: async (value, previous) => { if (fail) throw Object.assign(new Error("Disk full"), { code: "ENOSPC" }); return store.save(value, previous); },
+  } });
+  try {
+    await h.open();
+    const opened = await h.waitFor("session.opened");
+    assert.ok(opened.persistence);
+    fail = true;
+    await h.prompt();
+    await h.waitFor("session.turn", (e) => e.state === "completed");
+    assert.equal(h.events.filter((e) => e.type === "session.persistence").length, 0);
+    assert.equal(h.events.filter((e) => e.type === "session.notice" && e.notice.id === "droid-persistence-write-failed").length, 1);
+    assert.deepEqual((await store.load(opened.persistence)).items, []);
+    fail = false;
+    const after = h.events.length;
+    await h.prompt("recovered-disk");
+    await h.waitFor("session.turn", (e) => e.state === "completed", after);
+    const saved = await h.waitFor("session.persistence", () => true, after);
+    assert.equal((await store.load(saved.persistence)).items.length, 4);
+    assert.equal(h.natives[0].notifications.size, 1);
+  } finally { await h.cleanup(); await rm(directory, { recursive: true, force: true }); }
+});
+
+test("foreground completion, background wakeup and a racing prompt retain lifecycle order", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "droid-handoff-"));
+  const store = new FileSnapshotStore(directory);
+  const saving = deferred<void>(); const release = deferred<void>();
+  let saves = 0;
+  const h = await setup(successful, { snapshotStore: { load: (value) => store.load(value), save: async (value, previous) => {
+    if (++saves === 2) { saving.resolve(); await release.promise; }
+    return store.save(value, previous);
+  } } });
+  try {
+    await h.open(); await h.prompt(); await saving.promise;
+    const foreground = h.events.find((e) => e.type === "session.turn" && e.state === "started")!;
+    backgroundStart(h.natives[0]);
+    await h.prompt("handoff-race");
+    release.resolve();
+    const refused = await h.waitFor("session.prompt_result", (e) => e.clientMessageId === "handoff-race");
+    assert.equal(refused.result.type, "failed");
+    assert.equal(h.natives[0].streamCalls, 1);
+    const turns = h.events.filter((e): e is Extract<ProviderEvent, { type: "session.turn" }> => e.type === "session.turn");
+    assert.deepEqual(turns.map((e) => e.state), ["started", "completed", "started"]);
+    assert.equal(turns[0], foreground);
+    assert.equal(turns[0].turnId, turns[1].turnId);
+    assert.notEqual(turns[1].turnId, turns[2].turnId);
+    backgroundComplete(h.natives[0]);
+    await h.waitFor("session.turn", (e) => e.turnId === turns[2].turnId && e.state === "completed");
+  } finally { release.resolve(); await h.cleanup(); await rm(directory, { recursive: true, force: true }); }
+});
+
+test("a native background wakeup cancels prompt preparation without clearing background busy state", async () => {
+  const preparing = deferred<void>(); const prepared = deferred<PreparedPrompt>();
+  const h = await setup(successful, { prepare: async () => { preparing.resolve(); return prepared.promise; } });
+  try {
+    await h.open(); await h.prompt(); await preparing.promise;
+    backgroundStart(h.natives[0]);
+    await h.waitFor("session.turn", (e) => e.state === "started");
+    prepared.resolve({ text: "Pending prompt", timelineText: "Pending prompt", options: {} });
+    const refused = await h.waitFor("session.prompt_result");
+    assert.equal(refused.result.type, "failed");
+    await h.prompt("still-background-busy");
+    const stillBusy = await h.waitFor("session.prompt_result", (e) => e.clientMessageId === "still-background-busy");
+    assert.equal(stillBusy.result.type, "failed");
+    assert.equal(h.natives[0].streamCalls, 0);
+    assert.equal(h.terminalTurns().length, 0);
+    backgroundComplete(h.natives[0]);
+    await h.waitFor("session.turn", (e) => e.state === "completed");
+  } finally { prepared.resolve({ text: "Cleanup", timelineText: "Cleanup", options: {} }); await h.cleanup(); }
+});
+
+test("legacy empty snapshots migrate without filling history and missing v2 state never creates a new native session", async () => {
+  const h = await setup();
+  try {
+    await h.open("legacy", { version: 1, data: { nativeSessionId: nativeId, cwd, items: [] } });
+    const opened = await h.waitFor("session.opened");
+    assert.equal(opened.persistence?.version, 2);
+    assert.deepEqual((await h.snapshotStore.load(opened.persistence!)).items, []);
+    assert.equal(h.events.filter((e) => e.type === "timeline.item").length, 0);
+    const before = h.natives.length;
+    await h.connection.send({ type: "session.open", requestId: "missing-state", sessionId: "missing", history: "replay", config: h.config,
+      persistence: { version: 2, data: { nativeSessionId: nativeId, cwd, snapshotKey: "0".repeat(64) } } });
+    const rejected = await h.waitFor("request.failed", (e) => e.requestId === "missing-state");
+    assert.match(rejected.error.message, /missing, damaged/);
+    assert.equal(h.natives.length, before, "Do not silently create or resume a replacement native conversation");
+    assert.equal(h.natives[0].streamCalls, 0);
+  } finally { await h.cleanup(); }
+});
+
+test("native wakeups received while opening are published after ready and preserve restored Tasks", async () => {
+  const h = await setup(successful, { afterSubscribe: (native) => {
+    backgroundStart(native);
+    native.notify({ type: "tool_call", toolUse: { type: "tool_use", id: "opening-todo", name: "TodoWrite", input: { todos: "1. [completed] New observed task" } } });
+    native.notify({ type: "tool_result", messageId: "opening-result", toolUseId: "opening-todo", content: "Done", isError: false });
+    backgroundComplete(native);
+  } });
+  try {
+    await h.open("session", { version: 1, data: { nativeSessionId: nativeId, cwd, items: [
+      { type: "todo", id: "droid:todo", items: [{ text: "Already saved old task", completed: false, status: "pending" }] },
+    ] } });
+    await h.waitFor("session.turn", (e) => e.state === "completed");
+    const ready = h.events.findIndex((e) => e.type === "session.ready");
+    const start = h.events.findIndex((e) => e.type === "session.turn" && e.state === "started");
+    assert.ok(start > ready);
+    const saved = await h.waitFor("session.persistence");
+    const tasks = (await h.snapshotStore.load(saved.persistence)).items.find((i) => i.type === "todo");
+    assert.ok(tasks?.type === "todo");
+    assert.equal(tasks.items[0].text, "New observed task");
+    assert.equal(h.natives[0].streamCalls, 0);
+  } finally { await h.cleanup(); }
+});
+
+test("a prompt racing transport failure is refused before invoking the native stream", async () => {
+  const h = await setup();
+  try {
+    await h.open();
+    const failed = h.transports.at(-1)!.close();
+    await h.prompt("failure-race");
+    await failed;
+    const rejected = await h.waitFor("session.prompt_result");
+    assert.equal(rejected.result.type, "failed");
+    assert.equal(h.natives[0].streamCalls, 0);
+    assert.equal(h.terminalTurns().length, 0);
+  } finally { await h.cleanup(); }
+});
+
+test("steering ACK during a delayed terminal checkpoint cannot falsely acknowledge active steering", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "droid-finishing-steer-"));
+  const store = new FileSnapshotStore(directory);
+  const held = heldTurn(); const ack = deferred<void>(); const saving = deferred<void>(); const release = deferred<void>();
+  let saves = 0;
+  const h = await setup(held.script, { steer: async () => ack.promise, snapshotStore: {
+    load: (value) => store.load(value), save: async (value, previous) => {
+      if (++saves === 2) { saving.resolve(); await release.promise; }
+      return store.save(value, previous);
+    },
+  } });
+  try {
+    await h.open(); await h.prompt(); await held.started.promise;
+    await h.sendPrompt("finishing-steer", [{ type: "text", text: "An acknowledged native update" }], "steer");
+    await h.steerStarted.promise;
+    held.release.resolve(); await saving.promise;
+    ack.resolve();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(h.events.filter((e) => e.type === "session.prompt_result" && e.clientMessageId === "finishing-steer").length, 0);
+    release.resolve();
+    await h.rejectedSteer("finishing-steer", /turn ended/);
+    await h.waitFor("session.turn", (e) => e.state === "completed");
+    assert.equal(h.terminalTurns().length, 1);
+    assert.equal(h.natives[0].streamCalls, 1);
+  } finally { held.release.resolve(); ack.resolve(); release.resolve(); await h.cleanup(); await rm(directory, { recursive: true, force: true }); }
 });

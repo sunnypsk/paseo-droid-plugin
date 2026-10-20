@@ -38,7 +38,7 @@ Create an agent and select **Droid Native**. The existing `factory-droid` ACP pr
 
 Version 0.2.5 standardized the display name as Droid Native. The plugin/provider ID remains `droid-native`, and the registry ID remains `sunnypsk/droid`, preserving existing settings and conversations.
 
-After editing, run typecheck and load the changes with `paseo plugin reload droid-native`. A daemon restart is not required.
+After editing, run typecheck and load the changes with `paseo plugin reload droid-native`. Reload closes existing Droid Native provider connections: first check all affected agents and wait until no turn or approval is pending. A daemon restart is not required.
 
 ## Capabilities
 
@@ -66,7 +66,19 @@ Invalid attachments, models without image support, and rejected native acknowled
 
 The development source now records a sent steering row only after Droid acknowledges it. An explicit rejection leaves no sent row; an uncertain acknowledgment is recorded as a warning instead. Ordinary rejected settings preserve the session for retry. A timed-out settings update closes and invalidates that session, because its eventual native result is uncertain. Session mode choices follow Droid's organization policy when it reports allowed autonomy levels.
 
-Tool cards retain bounded input and output previews for Script and MCP calls, with credential and encoded-data fields redacted. Successful TodoWrite calls update Paseo Tasks; failed or interrupted calls do not claim task progress. Text deltas are batched for up to 50 ms or 4,096 characters and flushed before tool events and turn completion. Unchanged persistence rows reuse immutable snapshots instead of being serialized again. Persistence still retains the full conversation and its payload grows with history.
+Tool cards retain bounded input and output previews for Script and MCP calls, with credential and encoded-data fields redacted. Glob cards show all patterns and their search folder. Successful TodoWrite calls update Paseo Tasks; failed or interrupted calls do not claim task progress. Text deltas are batched for up to 50 ms or 4,096 characters and flushed before tool events and turn completion.
+
+The unreleased implementation observes native notifications for the entire session, including autonomous turns triggered by background command completion after the original prompt has ended. These updates use the same timeline, Tasks, permissions, usage, and turn lifecycle. They do not create artificial user prompts or run a second model request.
+
+## Local timeline storage (unreleased)
+
+Persistence v2 transfers a short reference containing only the native session ID, working directory, and `snapshotKey`. Complete timeline rows remain on the daemon under `$PASEO_HOME/plugin-state/droid-native/v2/` (`~/.paseo` when `PASEO_HOME` is unset). Unchanged rows are reused by content hash; manifests and row files are immutable. A small atomically replaced head makes the reference stable so a foreground handle cached by Paseo 0.11.4 also restores later observed background checkpoints. The reference is a pointer to the latest committed state, not a point-in-time export.
+
+Writes happen at checkpoints, not on every text delta. Files are private to the daemon user, and a new reference/head is committed only after its rows and manifest are written. A failed write retains the prior reference and produces a warning without turning completed model work into a failure. A missing, damaged, or identity-mismatched snapshot produces an explicit restore error instead of silently opening an empty conversation. Storage files are not automatically deleted.
+
+Existing v1 inline persistence remains readable and migrates only the timeline rows it already contains. This update does not reconstruct old reports, tool calls, or Tasks from Factory history; an old empty snapshot remains empty. `config.persist=false` does not create this local timeline storage.
+
+Back up the local state directory together with Paseo's agent records. A v2 reference requires this directory on the same daemon, and plugins that only understand v1 cannot read it. Do not downgrade to a v1-only plugin without a compatible v2 reader or a deliberate export/migration. Package and SDK versions remain unchanged until release.
 
 Native retraction clears the plugin's saved text and adds a withdrawal warning. Paseo 0.11.4 cannot remove already rendered native text through its public provider API, so this is a mitigation, not a complete visual retraction fix. See [the host limitation and upstream acceptance scenarios](docs/PASEO_RETRACTION.md).
 
@@ -118,6 +130,8 @@ Droid 0.244.0 may call MCP through Script. SDK 0.9.1 does not include that permi
 - `server/permission-compatibility.ts`: Strict validation and bridging for native Script permission requests and responses.
 - `server/usage.ts` and `server/quota.ts`: Read-only Factory login access, quota discovery, and Usage report mapping.
 - `server/timeline.ts`: Streaming events mapped to stable timeline snapshots.
+- `server/session-events.ts`: Lifetime native notification subscription and SDK conversion.
+- `server/persistence.ts` and `server/snapshot-store.ts`: Immutable row caching, private durable snapshots, and v1/v2 restore.
 - `server/steering.ts`: Mid-loop steering through the SDK's public schema on the shared transport.
 - `server/attachments.ts`: Attachment validation, native inputs, and local file references.
 
