@@ -86,12 +86,12 @@ export type ScriptPermissionHandler = (params: ScriptPermissionParams) => Reques
 // Pin both independently; accepting every future native revision would hide
 // another potentially incompatible permission shape.
 const SCRIPT_COMPAT_SDK_PROTOCOL_VERSION = "1.201.1";
-const SCRIPT_COMPAT_NATIVE_PROTOCOL_VERSION = "1.269.0";
+const SCRIPT_COMPAT_NATIVE_PROTOCOL_VERSIONS = ["1.269.0", "1.272.0"] as const;
 const SCRIPT_COMPAT_API_VERSION = "1.0.0";
 const scriptPermissionRequestSchema = z.strictObject({
   jsonrpc: z.literal("2.0"),
   factoryApiVersion: z.literal(SCRIPT_COMPAT_API_VERSION),
-  factoryProtocolVersion: z.literal(SCRIPT_COMPAT_NATIVE_PROTOCOL_VERSION),
+  factoryProtocolVersion: z.enum(SCRIPT_COMPAT_NATIVE_PROTOCOL_VERSIONS),
   _meta: sdkValue<TraceContextMeta>(TraceContextMetaSchema).optional(),
   type: z.literal("request"),
   id: z.string(),
@@ -115,7 +115,7 @@ const MAX_OWNED_IDS = 4096;
 const MAX_PENDING = 128;
 
 /**
- * Narrow wire compatibility for native Droid 0.244 Script confirmations absent
+ * Narrow wire compatibility for native Droid 0.244/0.245 Script confirmations absent
  * from SDK 0.9.1. Existing SDK requests retain their original bytes and handler.
  * Script requests always require a separate explicit Once/Cancel decision.
  */
@@ -123,7 +123,7 @@ export function createPermissionCompatibilityTransport(
   base: StringFramedDroidClientTransport,
   handler: ScriptPermissionHandler,
 ): PermissionCompatibilityTransport {
-  const pending = new Map<string, ScriptPermissionParams>();
+  const pending = new Map<string, { params: ScriptPermissionParams; protocolVersion: string }>();
   // Hashes retain no script/input data and keep duplicate IDs from reopening an
   // approval after interrupt or completion. Bound lifetime growth by closing.
   const seen = new Map<string, string>();
@@ -172,15 +172,16 @@ export function createPermissionCompatibilityTransport(
   }
 
   function respond(id: string, decision: unknown) {
-    const params = pending.get(id);
-    if (!params || terminalError) return;
+    const request = pending.get(id);
+    if (!request || terminalError) return;
+    const { params, protocolVersion } = request;
     pending.delete(id);
     const parsed = manualDecisionSchema.safeParse(typeof decision === "string" ? { selectedOption: decision } : decision);
     const allowed = parsed.success && params.options.some((option) => option.value === parsed.data.selectedOption);
     if (allowed) {
-      sendOwned(RequestPermissionResponseSchema.parse({ ...envelope(id, SCRIPT_COMPAT_NATIVE_PROTOCOL_VERSION), result: parsed.data }));
+      sendOwned(RequestPermissionResponseSchema.parse({ ...envelope(id, protocolVersion), result: parsed.data }));
     } else if (params.options.some((option) => option.value === ToolConfirmationOutcome.Cancel)) {
-      sendOwned(RequestPermissionResponseSchema.parse({ ...envelope(id, SCRIPT_COMPAT_NATIVE_PROTOCOL_VERSION), result: { selectedOption: ToolConfirmationOutcome.Cancel } }));
+      sendOwned(RequestPermissionResponseSchema.parse({ ...envelope(id, protocolVersion), result: { selectedOption: ToolConfirmationOutcome.Cancel } }));
     } else rejectRequest(id);
   }
 
@@ -271,7 +272,7 @@ export function createPermissionCompatibilityTransport(
     const supportedSdk = FACTORY_PROTOCOL_VERSION === SCRIPT_COMPAT_SDK_PROTOCOL_VERSION &&
       LEGACY_FACTORY_API_VERSION === SCRIPT_COMPAT_API_VERSION;
     if (!supportedSdk || !parsed.success) { rejectRequest(id); return; }
-    pending.set(id, parsed.data.params);
+    pending.set(id, { params: parsed.data.params, protocolVersion: parsed.data.factoryProtocolVersion });
     // Invoke asynchronously so a synchronous throw follows the same Cancel
     // path and the request is already owned before any callback can resolve it.
     void Promise.resolve().then(() => {

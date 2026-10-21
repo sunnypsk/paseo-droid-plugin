@@ -120,7 +120,7 @@ Enable **Enable Paseo tools** under Settings → your host → Agents, then crea
 
 Codex can use Paseo `create_agent` to launch `droid-native/<model>`. Droid can use the same tool to launch `codex/<model>` and follow up with `send_agent_prompt`. Keep `notifyOnFinish:true` to receive automatic child-completion notifications without polling. Native Ask/Auto modes continue to determine which actions require approval.
 
-Droid 0.244.0 may call MCP through Script. SDK 0.9.1 does not include that permission schema, so a separate compatibility layer displays the complete script and every call's parameters with allow-once and cancel choices. Requests supported by the SDK pass through unchanged. Compatibility is pinned to native protocol `1.269.0`, SDK protocol `1.201.1`, and API `1.0.0`; unknown formats are rejected. Revalidate after CLI or SDK upgrades.
+Droid 0.244.0 and 0.245.0 may call MCP through Script. SDK 0.9.1 does not include that permission schema, so a separate compatibility layer displays the complete script and every call's parameters with allow-once and cancel choices. Requests supported by the SDK pass through unchanged. Compatibility accepts native protocols `1.269.0` and `1.272.0`, SDK protocol `1.201.1`, and API `1.0.0`; each response preserves its request's native protocol. Unknown versions and formats are rejected. Revalidate after CLI or SDK upgrades.
 
 ## Source layout
 

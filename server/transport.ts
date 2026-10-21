@@ -82,12 +82,18 @@ class DroidProcessTransport implements StringFramedDroidClientTransport {
 
   async send(message: string): Promise<void> {
     if (!this.isConnected) throw this.failure ?? new Error("Droid transport is closed.");
-    await new Promise<void>((resolve, reject) => {
+    // SDK 0.9.1 attaches its response rejection handler only after send()
+    // settles. Waiting for a backpressured pipe here lets close/onError reject
+    // that response first and crash the plugin. Accept the queued write now;
+    // delivery is acknowledged by JSON-RPC and write failures use onError.
+    try {
       this.child.stdin.write(message.endsWith("\n") ? message : `${message}\n`, (error) => {
-        if (error) reject(new Error("Could not write to the Droid process."));
-        else resolve();
+        if (error) this.fail(new Error("Could not write to the Droid process."));
       });
-    });
+    } catch {
+      this.fail(new Error("Could not write to the Droid process."));
+      throw this.failure;
+    }
   }
 
   onMessage(handler: (message: string) => void): void {

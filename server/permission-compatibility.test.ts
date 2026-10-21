@@ -62,12 +62,11 @@ function knownTool() {
   };
 }
 
-function request(id = "script-1") {
+function request(id = "script-1", protocol = "1.269.0") {
   return {
     jsonrpc: "2.0", factoryApiVersion: LEGACY_FACTORY_API_VERSION,
-    // Actual Droid CLI 0.244.0 wire protocol, independently observed using a
-    // listModels probe. The installed SDK 0.9.1 remains on 1.201.1.
-    factoryProtocolVersion: "1.269.0",
+    // Native Droid 0.244/0.245 revisions differ from SDK 0.9.1's 1.201.1.
+    factoryProtocolVersion: protocol,
     type: "request", id, method: "droid.request_permission",
     params: {
       toolUses: [{
@@ -116,31 +115,33 @@ test("SDK-supported requests and all unrelated frames keep their original bytes,
   await bridge.transport.close();
 });
 
-test("Script remains pending until explicit Once/Cancel and responds with the native ID and protocol", async () => {
-  for (const decision of [Outcome.ProceedOnce, Outcome.Cancel] as const) {
-    const f = fake();
-    const choice = deferred();
-    let received: ScriptPermissionParams | undefined;
-    const bridge = createPermissionCompatibilityTransport(f.base, (params) => { received = params; return choice.promise; });
-    const forwarded: string[] = [];
-    bridge.transport.onMessage((frame) => forwarded.push(frame));
-    const input = request(`manual-${decision}`);
-    assert.equal(RequestPermissionRequestSchema.safeParse(input).success, false, "Fixture must reproduce SDK 0.9.1 incompatibility");
-    f.receive(input);
-    await tick();
-    assert.deepEqual(received, input.params);
-    assert.deepEqual(f.sent, []);
-    choice.resolve(decision);
-    await tick();
-    assert.deepEqual(f.responses(), [{
-      jsonrpc: "2.0", factoryApiVersion: LEGACY_FACTORY_API_VERSION, factoryProtocolVersion: input.factoryProtocolVersion,
-      type: "response", id: input.id, result: { selectedOption: decision },
-    }]);
-    assert.equal(RequestPermissionResponseSchema.safeParse(f.responses()[0]).success, true);
-    assert.deepEqual(forwarded, []);
-    await bridge.transport.close();
-  }
-});
+for (const protocol of ["1.269.0", "1.272.0"]) {
+  test(`Script ${protocol} remains pending until explicit Once/Cancel and responds with the native ID and protocol`, async () => {
+    for (const decision of [Outcome.ProceedOnce, Outcome.Cancel] as const) {
+      const f = fake();
+      const choice = deferred();
+      let received: ScriptPermissionParams | undefined;
+      const bridge = createPermissionCompatibilityTransport(f.base, (params) => { received = params; return choice.promise; });
+      const forwarded: string[] = [];
+      bridge.transport.onMessage((frame) => forwarded.push(frame));
+      const input = request(`manual-${decision}`, protocol);
+      assert.equal(RequestPermissionRequestSchema.safeParse(input).success, false, "Fixture must reproduce SDK 0.9.1 incompatibility");
+      f.receive(input);
+      await tick();
+      assert.deepEqual(received, input.params);
+      assert.deepEqual(f.sent, []);
+      choice.resolve(decision);
+      await tick();
+      assert.deepEqual(f.responses(), [{
+        jsonrpc: "2.0", factoryApiVersion: LEGACY_FACTORY_API_VERSION, factoryProtocolVersion: input.factoryProtocolVersion,
+        type: "response", id: input.id, result: { selectedOption: decision },
+      }]);
+      assert.equal(RequestPermissionResponseSchema.safeParse(f.responses()[0]).success, true);
+      assert.deepEqual(forwarded, []);
+      await bridge.transport.close();
+    }
+  });
+}
 
 test("mixed Script and SDK-known tool batches retain every input and accept known trace metadata", async () => {
   const f = fake();
@@ -165,6 +166,8 @@ test("future versions, unsupported fields, nested new confirmations and malforme
   bridge.transport.onMessage((frame) => forwarded.push(frame));
   const mutations: ((input: any) => void)[] = [
     (input) => { input.factoryProtocolVersion = "1.future"; },
+    (input) => { input.factoryProtocolVersion = "1.271.0"; },
+    (input) => { input.factoryProtocolVersion = "1.273.0"; },
     (input) => { input.factoryProtocolVersion = FACTORY_PROTOCOL_VERSION; },
     (input) => { delete input.factoryProtocolVersion; },
     (input) => { input.factoryApiVersion = "2.0.0"; },
@@ -229,11 +232,12 @@ test("handler failures, unsupported outcomes, unoffered choices and injected fie
 test("Once must be offered and invalid selection falls back only to an offered Cancel", async () => {
   const f = fake();
   const bridge = createPermissionCompatibilityTransport(f.base, () => Outcome.ProceedOnce);
-  const input = request();
+  const input = request("cancel-only", "1.272.0");
   input.params.options = [{ label: "Cancel", value: Outcome.Cancel }];
   f.receive(input);
   await tick();
   assert.deepEqual(f.responses()[0].result, { selectedOption: Outcome.Cancel });
+  assert.equal(f.responses()[0].factoryProtocolVersion, "1.272.0");
   await bridge.transport.close();
 });
 
@@ -242,7 +246,7 @@ test("concurrent requests settle independently, duplicate IDs never reopen, and 
   const choices = [deferred(), deferred()];
   let calls = 0;
   const bridge = createPermissionCompatibilityTransport(f.base, () => choices[calls++].promise);
-  const first = request("first"), second = request("second");
+  const first = request("first"), second = request("second", "1.272.0");
   f.receive(first); f.receive(first); f.receive(second);
   await tick();
   assert.equal(calls, 2);
@@ -250,6 +254,7 @@ test("concurrent requests settle independently, duplicate IDs never reopen, and 
   choices[0].resolve({ selectedOption: Outcome.ProceedOnce, comment: "Reviewed manually" });
   await tick();
   assert.deepEqual(f.responses().map((response) => [response.id, response.result.selectedOption]), [["second", Outcome.Cancel], ["first", Outcome.ProceedOnce]]);
+  assert.deepEqual(f.responses().map((response) => response.factoryProtocolVersion), ["1.272.0", "1.269.0"]);
   f.receive(first); f.receive(second);
   await tick();
   assert.equal(calls, 2);

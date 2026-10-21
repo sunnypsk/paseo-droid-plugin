@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { DroidClient } from "@factory/droid-sdk/node";
+import { DroidClient, ToolConfirmationOutcome } from "@factory/droid-sdk/node";
 import { createDroidTransport, withDroidDeadline } from "./transport";
+import { createPermissionCompatibilityTransport } from "./permission-compatibility";
+import { createSteeringTransport } from "./steering";
 
 function launch(script: string) {
   return {
@@ -119,4 +121,39 @@ test("close notification is once, reentrant, and tolerates a throwing handler", 
   await closing;
   assert.equal(notifications, 1);
   assert.equal(transport.isConnected, false);
+});
+
+test("closing during a backpressured SDK write settles without an unhandled rejection", async () => {
+  const base = await createDroidTransport(launch(`
+    process.stdin.pause();
+    process.stdout.write('ready\\n');
+    setInterval(() => {}, 1_000);
+  `));
+  await new Promise<void>((resolve) => base.onMessage(() => resolve()));
+  const compatibility = createPermissionCompatibilityTransport(base, () => ToolConfirmationOutcome.Cancel);
+  const transport = createSteeringTransport(compatibility.transport).transport;
+  const client = new DroidClient({ transport, requestTimeout: 10_000 });
+  // A paused peer cannot drain this frame. SDK 0.9.1 only observes its internal
+  // response promise after send() settles, even when the caller catches errors.
+  const pending = client.initializeSession({ cwd: "x".repeat(2 * 1024 * 1024), machineId: "synthetic" }).then(
+    () => { throw new Error("Unexpected SDK response"); },
+    (error: unknown) => error,
+  );
+  const closing = transport.close();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const error = await Promise.race([
+      pending,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error("SDK write remained pending after close")), 250);
+      }),
+    ]);
+    assert.ok(error instanceof Error);
+    assert.match(error.message, /transport was closed/);
+  } finally {
+    if (timer) clearTimeout(timer);
+    await closing;
+    await client.close();
+    await pending;
+  }
 });
