@@ -164,6 +164,15 @@ After full access was enabled, Computer Use actions and screenshots remained on 
 - The machine's installed 0.2.6 registry checkout received only `server/transport.ts` and `server/permission-compatibility.ts`; its existing persistence format remains in use. Original source files and hashes are backed up under `.test-output/installed-backup-20261021-161242/`. Reloading only `droid-native` returned `running`, and its model catalog was successfully queried through the production daemon. Daemon supervisor/worker PIDs, start time and configuration hash were unchanged. The native probe and synthetic subprocesses exited after validation.
 - Package/dependency versions and the installed registry revision remain unchanged. Existing conversations were not exercised through the Desktop UI.
 
+## 0.2.7 release preparation, 2026-10-21
+
+- Package and lockfile root versions are 0.2.7. Dependencies, plugin/provider ID `droid-native`, registry ID `sunnypsk/droid`, and the `>=0.11.4` Paseo requirement are unchanged.
+- This release includes the timeline, lifecycle, settings, Tasks and compact-persistence work described above, plus the Droid 0.245.0 permission-protocol and transport-close fixes from commit `5d33755`. README and overview now describe these as shipped behavior and disclose the local persistence directory and downgrade boundary.
+- On macOS with Node.js 22.14.0, typecheck and all 165 tests passed; package dry-run contents and `git diff --check` passed. The dependency tree did not change.
+- A clean Git-source installation on an isolated Paseo 0.12.0 daemon ran the declared locked production-dependency preparation and reached `running`. The isolated daemon was stopped after verification.
+- After confirming no Droid turn or permission was pending, the local host switched from the registry-managed 0.2.6 checkout to the 0.2.7 source directory, retaining plugin/provider ID `droid-native`. The previous managed installation, configuration and eight agent records were backed up locally. Conversation persistence and unrelated configuration were unchanged; one saved `lastStatus` changed from idle to closed when the old provider stopped. The new plugin reached `running` and returned 66 native model entries without sending a model prompt. Registry installation remains a separate reviewed publication step.
+- Registry review is requested for this release's exact commit; local validation and source publication do not establish registry approval.
+
 ## Verification boundaries and known limitations
 
 Paseo 0.11.4 preserves attachment previews in live user rows, but reconstructed rows after agent reload retain only text. Droid retains the native attachments. Host attachment-history rendering is not implemented by this plugin.
@@ -172,7 +181,7 @@ Pending tool/plan approvals still require an explicit decision. Droid exposes no
 
 The old host fallback was inspected in installed `app.asar`: `node_modules/@getpaseo/server/dist/server/server/agent/plugin-provider.js:923` mapped a nonmatching steer to unavailable, and `agent-manager.js:1835`/`:1908` performed replacement. Version 0.2.2 uses rejected acceptance and was verified through a real plugin subprocess in the UI. Host code was unchanged.
 
-Native retraction has deterministic reducer and replay coverage, without a live model retry/retraction UI check. The host drops empty text snapshots, so previously displayed text cannot be cleared by this plugin on Paseo 0.11.4. The unreleased implementation warns explicitly and clears plugin persistence; canonical host output can still include the old text until upstream supports text replacement.
+Native retraction has deterministic reducer and replay coverage, without a live model retry/retraction UI check. The host drops empty text snapshots, so previously displayed text cannot be cleared by this plugin on Paseo 0.11.4. The plugin warns explicitly and clears plugin persistence; canonical host output can still include the old text until upstream supports text replacement.
 
 The earlier independent Chrome client at `app.paseo.sh` timed out connecting directly to the production daemon. The 2026-10-20 check above instead verified the bundled Web UI on an isolated local daemon. Production web UI settings were unchanged and its daemon was not restarted. Compact/mobile layouts, physical devices, production daemon restart and Mission mode remain unverified. Large-history disk/reference checks do not establish live UI latency. ZIP/Office local references have automated coverage without a real model decoding check.
 

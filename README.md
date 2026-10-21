@@ -4,7 +4,7 @@ A community-maintained Paseo provider plugin that connects to the local Factory 
 
 ## Installation
 
-Requires Node.js 22, Paseo 0.11.4 or later, and an installed, signed-in Droid CLI 0.244.0 or later. Validation used Factory SDK 0.9.1. The current plugin version is 0.2.6.
+Requires Node.js 22, Paseo 0.11.4 or later, and an installed, signed-in Droid CLI. Script permission compatibility has been validated with Droid 0.244.0 and 0.245.0 using Factory SDK 0.9.1. The current plugin version is 0.2.7.
 
 Install the reviewed version from Paseo's plugin registry:
 
@@ -15,7 +15,7 @@ paseo plugin add sunnypsk/droid
 To install directly from GitHub:
 
 ```sh
-paseo plugin add git:sunnypsk/paseo-droid-plugin
+paseo plugin add git:sunnypsk/paseo-droid-plugin --ref v0.2.7
 ```
 
 Paseo installs production dependencies from the committed lockfile with dependency lifecycle scripts disabled. Install and sign in to the Droid CLI separately; this plugin does not download Droid.
@@ -64,13 +64,13 @@ For a pending tool or plan approval, the plugin asks you to resolve it first and
 
 Invalid attachments, models without image support, and rejected native acknowledgements produce errors without triggering Paseo's replacement fallback. A closed connection or acknowledgement timeout can still end native work. The plugin does not automatically restart the model loop.
 
-The development source now records a sent steering row only after Droid acknowledges it. An explicit rejection leaves no sent row; an uncertain acknowledgment is recorded as a warning instead. Ordinary rejected settings preserve the session for retry. A timed-out settings update closes and invalidates that session, because its eventual native result is uncertain. Session mode choices follow Droid's organization policy when it reports allowed autonomy levels.
+The plugin records a sent steering row only after Droid acknowledges it. An explicit rejection leaves no sent row; an uncertain acknowledgment is recorded as a warning instead. Ordinary rejected settings preserve the session for retry. A timed-out settings update closes and invalidates that session, because its eventual native result is uncertain. Session mode choices follow Droid's organization policy when it reports allowed autonomy levels.
 
 Tool cards retain bounded input and output previews for Script and MCP calls, with credential and encoded-data fields redacted. Glob cards show all patterns and their search folder. Successful TodoWrite calls update Paseo Tasks; failed or interrupted calls do not claim task progress. Text deltas are batched for up to 50 ms or 4,096 characters and flushed before tool events and turn completion.
 
-The unreleased implementation observes native notifications for the entire session, including autonomous turns triggered by background command completion after the original prompt has ended. These updates use the same timeline, Tasks, permissions, usage, and turn lifecycle. They do not create artificial user prompts or run a second model request.
+The plugin observes native notifications for the entire session, including autonomous turns triggered by background command completion after the original prompt has ended. These updates use the same timeline, Tasks, permissions, usage, and turn lifecycle. They do not create artificial user prompts or run a second model request.
 
-## Local timeline storage (unreleased)
+## Local timeline storage
 
 Persistence v2 transfers a short reference containing only the native session ID, working directory, and `snapshotKey`. Complete timeline rows remain on the daemon under `$PASEO_HOME/plugin-state/droid-native/v2/` (`~/.paseo` when `PASEO_HOME` is unset). Unchanged rows are reused by content hash; manifests and row files are immutable. A small atomically replaced head makes the reference stable so a foreground handle cached by Paseo 0.11.4 also restores later observed background checkpoints. The reference is a pointer to the latest committed state, not a point-in-time export.
 
@@ -78,7 +78,7 @@ Writes happen at checkpoints, not on every text delta. Files are private to the 
 
 Existing v1 inline persistence remains readable and migrates only the timeline rows it already contains. This update does not reconstruct old reports, tool calls, or Tasks from Factory history; an old empty snapshot remains empty. `config.persist=false` does not create this local timeline storage.
 
-Back up the local state directory together with Paseo's agent records. A v2 reference requires this directory on the same daemon, and plugins that only understand v1 cannot read it. Do not downgrade to a v1-only plugin without a compatible v2 reader or a deliberate export/migration. Package and SDK versions remain unchanged until release.
+Back up the local state directory together with Paseo's agent records. A v2 reference requires this directory on the same daemon, and plugins that only understand v1 cannot read it. Do not downgrade to a v1-only plugin without a compatible v2 reader or a deliberate export/migration. Version 0.2.7 includes this persistence format; SDK and dependency versions are unchanged.
 
 Native retraction clears the plugin's saved text and adds a withdrawal warning. Paseo 0.11.4 cannot remove already rendered native text through its public provider API, so this is a mitigation, not a complete visual retraction fix. See [the host limitation and upstream acceptance scenarios](docs/PASEO_RETRACTION.md).
 
