@@ -4,7 +4,7 @@ A community-maintained Paseo provider plugin that connects to the local Factory 
 
 ## Installation
 
-Requires Node.js 22, Paseo 0.11.4 or later, and an installed, signed-in Droid CLI. Script permission compatibility has been validated with Droid 0.244.0 and 0.245.0 using Factory SDK 0.9.1. The current plugin version is 0.2.7.
+Requires Node.js 22, Paseo 0.11.4 or later, and an installed, signed-in Droid CLI. Script permission compatibility has been validated with Droid 0.244.0, 0.245.0, and 0.249.0 using Factory SDK 0.9.1. The current plugin version is 0.3.0.
 
 Install the reviewed version from Paseo's plugin registry:
 
@@ -15,7 +15,7 @@ paseo plugin add sunnypsk/droid
 To install directly from GitHub:
 
 ```sh
-paseo plugin add git:sunnypsk/paseo-droid-plugin --ref v0.2.7
+paseo plugin add git:sunnypsk/paseo-droid-plugin --ref v0.3.0
 ```
 
 Paseo installs production dependencies from the committed lockfile with dependency lifecycle scripts disabled. Install and sign in to the Droid CLI separately; this plugin does not download Droid.
@@ -47,12 +47,33 @@ After editing, run typecheck and load the changes with `paseo plugin reload droi
 - Full plan proposals and batch approvals listing every requested action.
 - Model, reasoning, and mode settings, with Paseo MCP server injection.
 - Native model multipliers, conversation context capacity, and Factory account quota in Paseo Usage.
+- Native slash commands, custom commands, and user-invocable skills in the composer on Droid 0.249.0 or later.
 - Interrupt, close, and resume for sessions created by this plugin.
 - Steering within the active turn, including steering messages with images or documents.
 - Native PNG, JPEG, GIF, WebP, PDF, and UTF-8 text inputs; validated local file references for other formats.
 - Completed-turn timeline snapshots in Paseo persistence, with native conversation context stored by Droid.
 
 The transport receives Paseo's daemon launch command, arguments, and environment. The SDK's default high-level launcher requires an API key; this plugin supplies a transport created with Paseo process helpers, allowing it to reuse the CLI login without creating an API-key file.
+
+## Native slash commands
+
+Version 0.3.0 adds slash commands through Paseo's existing composer. Requires Droid 0.249.0 or later; older supported CLIs retain message and steering support and show an update notice. After upgrading an older CLI, reload Droid Native when its agents have no active turn or pending approval. No Paseo core or client extension is required.
+
+| Command | Behavior |
+| --- | --- |
+| `/compact [instructions]` | Summarize native conversation context, optionally preserving specific details. |
+| `/context` | Show native context capacity, occupancy, free tokens, and category breakdown. |
+| `/limits` | Show Factory account quota for this session's login, or its unavailable/expired status. |
+
+`/context` and `/limits` do not start a model request. `/limits` uses the same read-only quota adapter as Paseo Usage; it does not change quota preferences or refresh credentials. API-key and custom-backend sessions do not fall back to another subscription login. Windows launch environments can use `USERPROFILE` when `HOME` is absent.
+
+Droid discovers user, workspace, and plugin-provided custom commands and skills. Enabled, user-invocable skills appear alongside custom commands, honoring `disableBuiltinSkills`. Builtins take precedence over custom commands, which take precedence over skills with the same name. The native loader determines workspace-versus-personal command precedence.
+
+Custom commands and skills are sent as `/name arguments` to Droid's native resolver. Markdown `$ARGUMENTS`, quoted script arguments, interpreters, working directory, and environment retain CLI behavior. Executable custom commands run through Droid's own loader with its normal host access. The plugin does not expand prompts or launch these scripts itself. The sent timeline row retains the command text.
+
+Commands require an idle session with no pending permission or question. Command steering is rejected while retaining the active turn. Model and permission changes continue to use Paseo's existing controls. Command discovery runs before session readiness, after turns, and after compaction; a failed refresh preserves the last available entries and displays a notice. Paseo's command picker may retain its own cached list until it refreshes.
+
+Compaction adopts the SDK's successor handle, rebinds notifications, and saves the current native identity before reporting completion. A changed native session ID gets a new snapshot reference; earlier references and snapshots retain their identity. A checkpoint failure reports that compaction could not be saved and leaves the live successor available for a later checkpoint. Keep that session open until storage recovers. A timed-out or interrupted compaction closes its uncertain connection and requires reopening. Ordinary native rejection leaves the session usable.
 
 ## Steering and attachments
 
@@ -106,13 +127,13 @@ The conversation context meter uses native `getContextStats()` values for curren
 
 The **Factory** card in Paseo Usage shows Standard and Core quota windows, used and remaining percentages, reset times, and the Extra Usage balance in USD. The API does not provide a plan's total token allowance, so the plugin does not estimate it. Window names follow the API's fiveHour, weekly, and monthly fields rather than inferring periods from countdowns. Paseo caches usage for five minutes; a manual refresh is available.
 
-Quota uses the read-only billing endpoint behind Droid 0.244.0's `/limits` command. This is a native internal API rather than a public SDK method and needs revalidation after CLI or service changes. The plugin reads the current login's access token from macOS Keychain or Factory's encrypted file store. It does not refresh tokens, rewrite credentials, change plans, or change Extra Usage settings. Expired, rejected, or missing login data is reported explicitly.
+Quota uses the read-only billing endpoint behind Droid's `/limits` command. This is a native internal API rather than a public SDK method and needs revalidation after CLI or service changes. The plugin reads the current login through macOS Keychain, Windows Credential Manager, or Factory's encrypted file store. On Windows, a bounded hidden PowerShell process reads only Factory's encryption-key entry with `CredReadW`; it does not enumerate credentials. The secure store takes precedence over an older file login unless `FACTORY_DISABLE_KEYRING` is enabled. The plugin does not refresh tokens, rewrite credentials, change plans, or change Extra Usage settings. Expired, rejected, or missing login data is reported explicitly.
 
 Quota requests send only the existing access token and applicable organization header to `/api/billing/limits` on Factory's official `api.factory.ai` or `api.eu.factory.ai` host. They do not send refresh tokens. Credentials are excluded from repository files, Usage reports, and account inputs. Prompts, attachments, tool content, and MCP data are processed according to your Droid, Factory, and MCP settings; native local session storage does not mean all data stays on the host.
 
 View account quota in the sidebar's global Usage panel and model context in the conversation context meter. Paseo 0.11.4's generic plugin provider does not bridge `usageSession()`, so the conversation popover does not also display the Factory account card. Global Usage and the context meter remain available. Session-environment login filtering is implemented in the source, but this host version does not call it for the conversation popover.
 
-Explicit API-key, airgap, and custom-backend configurations do not fall back to an unrelated stored subscription. Linux keyring support is not implemented. Live account-quota validation has been limited to macOS Keychain. Usage reports and account inputs contain no credentials.
+Explicit API-key, airgap, and custom-backend configurations do not fall back to an unrelated stored subscription. Linux keyring support is not implemented. Live account-quota validation covers macOS Keychain and Windows Credential Manager. Usage reports and account inputs contain no credentials.
 
 ## Paseo orchestration
 
@@ -120,7 +141,7 @@ Enable **Enable Paseo tools** under Settings → your host → Agents, then crea
 
 Codex can use Paseo `create_agent` to launch `droid-native/<model>`. Droid can use the same tool to launch `codex/<model>` and follow up with `send_agent_prompt`. Keep `notifyOnFinish:true` to receive automatic child-completion notifications without polling. Native Ask/Auto modes continue to determine which actions require approval.
 
-Droid 0.244.0 and 0.245.0 may call MCP through Script. SDK 0.9.1 does not include that permission schema, so a separate compatibility layer displays the complete script and every call's parameters with allow-once and cancel choices. Requests supported by the SDK pass through unchanged. Compatibility accepts native protocols `1.269.0` and `1.272.0`, SDK protocol `1.201.1`, and API `1.0.0`; each response preserves its request's native protocol. Unknown versions and formats are rejected. Revalidate after CLI or SDK upgrades.
+Droid may call tools through Script. SDK 0.9.1 does not include that permission schema, so a separate compatibility layer displays the complete script and every call's parameters with allow-once and cancel choices. Requests supported by the SDK pass through unchanged. Compatibility accepts native protocols `1.269.0`, `1.272.0`, and `1.275.0`, SDK protocol `1.201.1`, and API `1.0.0`; each response preserves its request's native protocol. Unknown versions and formats are rejected. Revalidate after CLI or SDK upgrades.
 
 ## Source layout
 
@@ -129,10 +150,12 @@ Droid 0.244.0 and 0.245.0 may call MCP through Script. SDK 0.9.1 does not includ
 - `server/permissions.ts`: Tool, plan, and AskUser callbacks.
 - `server/permission-compatibility.ts`: Strict validation and bridging for native Script permission requests and responses.
 - `server/usage.ts` and `server/quota.ts`: Read-only Factory login access, quota discovery, and Usage report mapping.
+- `server/windows-keyring.ts`: Exact-target, read-only Windows Credential Manager access.
 - `server/timeline.ts`: Streaming events mapped to stable timeline snapshots.
 - `server/session-events.ts`: Lifetime native notification subscription and SDK conversion.
 - `server/persistence.ts` and `server/snapshot-store.ts`: Immutable row caching, private durable snapshots, and v1/v2 restore.
 - `server/steering.ts`: Mid-loop steering through the SDK's public schema on the shared transport.
+- `server/commands.ts`: Native command discovery, context RPCs, command presentation, and session quota reports.
 - `server/attachments.ts`: Attachment validation, native inputs, and local file references.
 
 References: [Paseo provider plugins](https://paseo.sh/docs/plugins/providers) and [Factory SDK](https://docs.factory.com/sdk/typescript).

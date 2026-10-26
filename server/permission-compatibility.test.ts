@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import { test } from "node:test";
 import {
   DroidClient,
@@ -65,7 +66,7 @@ function knownTool() {
 function request(id = "script-1", protocol = "1.269.0") {
   return {
     jsonrpc: "2.0", factoryApiVersion: LEGACY_FACTORY_API_VERSION,
-    // Native Droid 0.244/0.245 revisions differ from SDK 0.9.1's 1.201.1.
+    // Native revisions differ from SDK 0.9.1's 1.201.1.
     factoryProtocolVersion: protocol,
     type: "request", id, method: "droid.request_permission",
     params: {
@@ -115,7 +116,7 @@ test("SDK-supported requests and all unrelated frames keep their original bytes,
   await bridge.transport.close();
 });
 
-for (const protocol of ["1.269.0", "1.272.0"]) {
+for (const protocol of ["1.269.0", "1.272.0", "1.275.0"]) {
   test(`Script ${protocol} remains pending until explicit Once/Cancel and responds with the native ID and protocol`, async () => {
     for (const decision of [Outcome.ProceedOnce, Outcome.Cancel] as const) {
       const f = fake();
@@ -142,6 +143,24 @@ for (const protocol of ["1.269.0", "1.272.0"]) {
     }
   });
 }
+
+test("real Droid 0.249 Script fixture retains its full review content and native reply protocol", async () => {
+  const input = JSON.parse(await readFile(new URL("./fixtures/droid-0.249-script-permission.json", import.meta.url), "utf8"));
+  assert.equal(input.factoryProtocolVersion, "1.275.0");
+  assert.equal(scriptPermissionParamsSchema.safeParse(input.params).success, true);
+  assert.equal(RequestPermissionRequestSchema.safeParse(input).success, false);
+  const f = fake();
+  let reviewed: ScriptPermissionParams | undefined;
+  const bridge = createPermissionCompatibilityTransport(f.base, (params) => { reviewed = params; return Outcome.Cancel; });
+  f.receive(input);
+  await tick();
+  assert.deepEqual(reviewed, input.params);
+  assert.deepEqual(f.responses(), [{
+    jsonrpc: "2.0", factoryApiVersion: "1.0.0", factoryProtocolVersion: "1.275.0",
+    type: "response", id: input.id, result: { selectedOption: Outcome.Cancel },
+  }]);
+  await bridge.transport.close();
+});
 
 test("mixed Script and SDK-known tool batches retain every input and accept known trace metadata", async () => {
   const f = fake();

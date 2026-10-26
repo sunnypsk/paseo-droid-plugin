@@ -86,7 +86,7 @@ export type ScriptPermissionHandler = (params: ScriptPermissionParams) => Reques
 // Pin both independently; accepting every future native revision would hide
 // another potentially incompatible permission shape.
 const SCRIPT_COMPAT_SDK_PROTOCOL_VERSION = "1.201.1";
-const SCRIPT_COMPAT_NATIVE_PROTOCOL_VERSIONS = ["1.269.0", "1.272.0"] as const;
+const SCRIPT_COMPAT_NATIVE_PROTOCOL_VERSIONS = ["1.269.0", "1.272.0", "1.275.0"] as const;
 const SCRIPT_COMPAT_API_VERSION = "1.0.0";
 const scriptPermissionRequestSchema = z.strictObject({
   jsonrpc: z.literal("2.0"),
@@ -115,7 +115,7 @@ const MAX_OWNED_IDS = 4096;
 const MAX_PENDING = 128;
 
 /**
- * Narrow wire compatibility for native Droid 0.244/0.245 Script confirmations absent
+ * Narrow wire compatibility for native Droid 0.244/0.245/0.249 Script confirmations absent
  * from SDK 0.9.1. Existing SDK requests retain their original bytes and handler.
  * Script requests always require a separate explicit Once/Cancel decision.
  */

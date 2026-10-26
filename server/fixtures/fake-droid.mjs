@@ -2,8 +2,8 @@
 import { createInterface } from "node:readline";
 import { randomUUID } from "node:crypto";
 
-if (process.argv.includes("--version")) { process.stdout.write("droid 0.244.0\n"); process.exit(0); }
-const sessionId = "11111111-1111-4111-8111-111111111111";
+if (process.argv.includes("--version")) { process.stdout.write("droid 0.249.0\n"); process.exit(0); }
+let sessionId = "11111111-1111-4111-8111-111111111111";
 const settings = { modelId: "test-model", reasoningEffort: "low", autonomyLevel: "off", interactionMode: "auto" };
 const tokenUsage = { inputTokens: 100, outputTokens: 20, cacheReadTokens: 50, cacheCreationTokens: 0, thinkingTokens: 0 };
 let envelope = {};
@@ -30,6 +30,7 @@ input.on("line", (line) => {
       reply({ sessionId, session: { messages: [] }, settings });
       break;
     case "droid.load_session":
+      sessionId = request.params.sessionId;
       reply({ session: { messages: [] }, settings, cwd: process.cwd() });
       break;
     case "droid.update_session_settings":
@@ -39,12 +40,22 @@ input.on("line", (line) => {
     case "droid.get_context_stats":
       reply({ used: 1000, remaining: 127000, limit: 128000, accuracy: "estimated", updatedAt: new Date().toISOString() });
       break;
+    case "droid.list_commands":
+      reply({ commands: [{ name: "native-review", description: "Synthetic native command", argumentHint: "<branch>" }] }); break;
+    case "droid.list_skills":
+      reply({ skills: [{ name: "native-skill", description: "Synthetic skill", location: "project", filePath: "/synthetic/SKILL.md", enabled: true, userInvocable: true }] }); break;
+    case "droid.get_context_breakdown":
+      reply({ modelId: settings.modelId, modelDisplayName: "Synthetic", contextBudget: 128000, usedTokens: 1000, freeTokens: 127000,
+        categories: [{ name: "Messages", tokens: 1000, colorKey: "messages" }] }); break;
+    case "droid.compact_session":
+      reply({ newSessionId: randomUUID(), removedCount: 2 }); break;
     case "droid.add_user_message": {
       reply({});
       const id = request.params.messageId;
       message(id, "user", request.params.text);
-      message(`foreground:${id}`, "assistant", "Foreground finished; synthetic background work is scheduled.");
+      message(`foreground:${id}`, "assistant", process.env.DROID_FAKE_COMMAND_ECHO === "1" ? `Native received: ${request.params.text}` : "Foreground finished; synthetic background work is scheduled.");
       complete(id);
+      if (process.env.DROID_FAKE_BACKGROUND_DISABLED === "1") break;
       const timer = setTimeout(() => {
         timers.delete(timer);
         const backgroundId = `execute-completion:${randomUUID()}`;

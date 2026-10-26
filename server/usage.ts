@@ -7,6 +7,7 @@ import { promisify } from "node:util";
 import { z } from "zod";
 import { hashAccountKey, unavailable, type UsageSourceRegistration } from "@getpaseo/plugin/server/usage";
 import { parseFactoryQuota } from "./quota";
+import { readWindowsKeyringKey } from "./windows-keyring";
 
 const execute = promisify(execFile);
 const GLOBAL_ORIGIN = "https://api.factory.ai";
@@ -25,6 +26,7 @@ export interface DroidUsageDependencies {
   readText: (path: string) => Promise<string>;
   exists: (path: string) => Promise<boolean>;
   keychainKey: (development: boolean) => Promise<string>;
+  keyringKey: (development: boolean) => Promise<string>;
   fetch: typeof fetch;
   now: () => number;
 }
@@ -40,6 +42,7 @@ const defaults: DroidUsageDependencies = {
     return stdout.trim();
   },
   fetch: (...args) => fetch(...args), now: Date.now,
+  keyringKey: readWindowsKeyringKey,
 };
 
 /** Read-only adapter for the same login and endpoint used by Droid 0.244 /limits. */
@@ -70,6 +73,9 @@ export function createDroidUsageSource(overrides: Partial<DroidUsageDependencies
     if (!input.disableKeyring && deps.platform === "darwin" && await deps.exists(join(input.directory, "auth.v2.loginkeychain"))) {
       candidates.push(async () => decrypt(await deps.readText(join(input.directory, "auth.v2.loginkeychain")), await deps.keychainKey(input.development)));
     }
+    if (!input.disableKeyring && deps.platform === "win32" && await deps.exists(join(input.directory, "auth.v2.keyring"))) {
+      candidates.push(async () => decrypt(await deps.readText(join(input.directory, "auth.v2.keyring")), await deps.keyringKey(input.development)));
+    }
     if (await deps.exists(join(input.directory, "auth.v2.file"))) {
       candidates.push(async () => decrypt(await deps.readText(join(input.directory, "auth.v2.file")), await deps.readText(join(input.directory, "auth.v2.key"))));
     }
@@ -77,7 +83,7 @@ export function createDroidUsageSource(overrides: Partial<DroidUsageDependencies
       try { return parseLogin(await read()); } catch { /* Native CLI also falls back to its file store. */ }
     }
     // No subprocess, JSON, ciphertext, or upstream error content escapes here.
-    throw new Error("Could not read the Droid login. This adapter supports macOS Keychain and Factory's encrypted file store. Sign in with droid and retry.");
+    throw new Error("Could not read the Droid login from its secure store or encrypted file. Check Droid's current login and credential-store access.");
   }
 
   return {

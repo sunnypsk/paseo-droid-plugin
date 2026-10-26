@@ -11,6 +11,7 @@ import {
   DroidInteractionMode,
   RequestPermissionRequestParamsSchema,
   ToolConfirmationOutcome,
+  TimeoutError as DroidTimeoutError,
   ToolConfirmationType,
   SessionNotificationPayloadSchema,
   type AskUserResult,
@@ -20,6 +21,8 @@ import {
   type MessageOptions,
   type GetContextStatsResult,
   type ModelInfo,
+  type ListSkillsResult,
+  type CompactSessionRequestParams,
   type StringFramedDroidClientTransport,
 } from "@factory/droid-sdk/node";
 import type { DroidMessage } from "@factory/droid-sdk";
@@ -35,6 +38,7 @@ import { createDroidProvider, supported, type DroidDependencies } from "./provid
 import { preparePrompt, type PreparedPrompt } from "./attachments";
 import { SteeringRejectedError, type SteeringOptions } from "./steering";
 import { FileSnapshotStore, type SnapshotStore } from "./snapshot-store";
+import { type NativeCommand, type ContextBreakdown } from "./commands";
 
 const cwd = "/tmp/droid-provider-tests";
 const nativeId = "68c0cb90-4209-49e2-a7e7-f1d4fc1e49fb";
@@ -68,7 +72,7 @@ type Script = (native: FakeNative, text: string) => AsyncGenerator<DroidMessage>
 type NativeOptions = { transport: StringFramedDroidClientTransport; permissionHandler: ClientPermissionHandler; askUserHandler: ClientAskUserHandler };
 
 class FakeNative {
-  readonly id = nativeId;
+  id: string = nativeId;
   readonly cwd = cwd;
   readonly settings: Record<string, unknown> = {
     modelId: "test-model",
@@ -85,6 +89,15 @@ class FakeNative {
   readonly onShutdown = new Set<() => void>();
   readonly notifications = new Set<(notification: Record<string, unknown>) => void>();
   readonly nativeTurnIds: string[] = [];
+  skillHandler?: () => Promise<ListSkillsResult>;
+  compactHandler?: (native: FakeNative, params?: CompactSessionRequestParams) => Promise<{ session: FakeNative; removedCount: number }>;
+  async listSkills(): Promise<ListSkillsResult> { return this.skillHandler ? this.skillHandler() : { skills: [] }; }
+  async compact(params?: CompactSessionRequestParams) {
+    if (this.compactHandler) return this.compactHandler(this, params);
+    const session = new FakeNative(this.options, this.script, this.context, this.afterSubscribe);
+    session.id = randomUUID();
+    return { session, removedCount: 2 };
+  }
   onNotification(callback: (notification: Record<string, unknown>) => void) {
     this.notifications.add(callback);
     this.afterSubscribe?.(this);
@@ -182,6 +195,14 @@ async function* needsPermission(native: FakeNative): AsyncGenerator<DroidMessage
 }
 
 interface SetupOptions {
+  version?: string;
+  commands?: () => Promise<NativeCommand[]>;
+  skills?: () => Promise<ListSkillsResult>;
+  contextBreakdown?: () => Promise<ContextBreakdown>;
+  limits?: DroidDependencies["limits"];
+  commandTimeoutMs?: number;
+  compactionTimeoutMs?: number;
+  compact?: FakeNative["compactHandler"];
   create?: ReturnType<typeof deferred<void>>;
   models?: ReturnType<typeof deferred<void>>;
   steer?: (text: string, options?: SteeringOptions) => Promise<void>;
@@ -212,6 +233,16 @@ async function setup(script: Script = successful, gates: SetupOptions = {}) {
   const sends = new Map<string, Promise<void>>();
   const deps = {
     snapshotStore,
+    version: async () => gates.version ?? "0.249.0",
+    commands(transport: StringFramedDroidClientTransport) {
+      return { transport, list: gates.commands ?? (async () => []), context: gates.contextBreakdown ?? (async () => ({
+        modelId: "test-model", modelDisplayName: "Test model", contextBudget: 128000, usedTokens: 1000, freeTokens: 127000,
+        categories: [{ name: "Messages", tokens: 1000 }],
+      })) };
+    },
+    limits: gates.limits,
+    commandTimeoutMs: gates.commandTimeoutMs,
+    compactionTimeoutMs: gates.compactionTimeoutMs,
     async transport(_launch: unknown, options: { cwd?: string; env?: Readonly<Record<string, string>> } = {}) {
       const transport = new FakeTransport();
       transports.push(transport);
@@ -238,12 +269,17 @@ async function setup(script: Script = successful, gates: SetupOptions = {}) {
         await gates.create.promise;
       }
       const native = new FakeNative(options, script, gates.context, gates.afterSubscribe);
+      native.skillHandler = gates.skills;
+      native.compactHandler = gates.compact;
       natives.push(native);
       return native as unknown as DroidSession;
     },
     async resumeSession(id: string, options: NativeOptions) {
       resumed.push(id);
       const native = new FakeNative(options, script, gates.context, gates.afterSubscribe);
+      native.id = id;
+      native.skillHandler = gates.skills;
+      native.compactHandler = gates.compact;
       natives.push(native);
       return native as unknown as DroidSession;
     },
@@ -342,6 +378,310 @@ async function setup(script: Script = successful, gates: SetupOptions = {}) {
 function catalogModel(tokenMultiplier: number, id = "test-model"): ModelInfo {
   return { id, displayName: id === "test-model" ? "Test model" : id, supportedReasoningEfforts: [], disabled: false, tokenMultiplier } as unknown as ModelInfo;
 }
+
+async function runCommand(h: Awaited<ReturnType<typeof setup>>, name: string, args = "", clientMessageId: string = randomUUID()) {
+  await h.connection.send({ type: "session.prompt", sessionId: "session", prompt: {
+    clientMessageId, delivery: "auto", input: { type: "command", name, arguments: args },
+  } });
+  return h.waitFor("session.prompt_result", (event) => event.clientMessageId === clientMessageId);
+}
+
+test("commands are published before ready, refreshed after turns, and rediscovered on resume", async () => {
+  let custom = [{ name: "review", description: "Review", argumentHint: "<branch>" }];
+  const h = await setup(successful, { commands: async () => custom });
+  try {
+    await h.open();
+    const commands = await h.waitFor("session.commands");
+    assert.ok(commands.commands.some((command) => command.name === "review"));
+    assert.ok(h.events.indexOf(commands) < h.events.findIndex((event) => event.type === "session.ready"));
+    custom = [{ name: "changed", description: "Changed", argumentHint: "" }];
+    await h.prompt();
+    await h.waitFor("session.turn", (event) => event.state === "completed");
+    assert.ok(h.events.findLast((event) => event.type === "session.commands")?.commands.some((command) => command.name === "changed"));
+    const saved = await h.waitFor("session.persistence");
+    await h.connection.send({ type: "session.close", requestId: "close-commands", sessionId: "session" });
+    await h.waitFor("session.closed");
+    custom = [{ name: "on-resume", description: "Resumed", argumentHint: "" }];
+    await h.open("resumed-commands", saved.persistence);
+    const resumed = await h.waitFor("session.commands", (event) => event.sessionId === "resumed-commands");
+    assert.ok(resumed.commands.some((command) => command.name === "on-resume"));
+  } finally { await h.cleanup(); }
+});
+
+test("native custom commands receive unexpanded quoted arguments and retain their composer text", async () => {
+  const h = await setup(successful, { commands: async () => [{ name: "review", description: "Review" }] });
+  try {
+    await h.open();
+    const args = '"feature/a b"\n$ARGUMENTS --literal  ';
+    const receipt = await runCommand(h, "review", args, "custom-command");
+    assert.equal(receipt.result.type, "turn");
+    await h.waitFor("session.turn", (event) => event.state === "completed");
+    assert.equal(h.natives[0].streamInputs[0].text, `/review ${args}`);
+    const row = await h.waitFor("timeline.item", (event) => event.item.type === "user_message" && event.item.clientMessageId === "custom-command");
+    assert.equal(row.item.type === "user_message" && row.item.text, `/review ${args}`);
+  } finally { await h.cleanup(); }
+});
+
+test("failed discovery retains builtins, and an old CLI retains message sessions without command capability", async () => {
+  let unavailable = true;
+  const h = await setup(successful, { commands: async () => {
+    if (unavailable) throw new Error("private-error");
+    return [{ name: "recovered", description: "Recovered command" }];
+  } });
+  try {
+    await h.open();
+    assert.deepEqual((await h.waitFor("session.commands")).commands.map((command) => command.name), ["compact", "context", "limits"]);
+    await h.waitFor("session.notice", (event) => event.notice.id === "droid-commands-discovery");
+    assert.equal((await runCommand(h, "context")).result.type, "completed");
+    assert.equal(h.natives[0].streamCalls, 0);
+    unavailable = false;
+    await h.prompt();
+    await h.waitFor("session.turn", (event) => event.state === "completed");
+    await h.waitFor("session.notice", (event) => event.notice.id === "droid-commands-discovery" && event.notice.dismissed === true);
+    assert.ok(h.events.findLast((event) => event.type === "session.commands")?.commands.some((command) => command.name === "recovered"));
+  } finally { await h.cleanup(); }
+  const old = await setup(successful, { version: "0.245.0", commands: async () => { throw new Error("Must not discover"); } });
+  try {
+    await old.open();
+    assert.equal(old.connection.capabilities.includes("prompt.command"), false);
+    await old.waitFor("session.notice", (event) => event.notice.id === "droid-commands-version");
+    await old.prompt();
+    await old.waitFor("session.turn", (event) => event.state === "completed");
+    assert.equal(old.events.some((event) => event.type === "session.commands"), false);
+  } finally { await old.cleanup(); }
+});
+
+test("command steering and concurrent commands preserve the original turn without a failed steering disposition", async () => {
+  const gate = deferred<void>();
+  const h = await setup(async function* () { await gate.promise; yield result(); });
+  try {
+    await h.open(); await h.prompt("original");
+    await h.waitFor("session.turn", (event) => event.state === "started");
+    await assert.rejects(h.connection.send({ type: "session.prompt", sessionId: "session", prompt: {
+      clientMessageId: "steered-command", delivery: "steer", input: { type: "message", content: [{ type: "text", text: "/compact retain details" }] },
+    } }), /idle session/);
+    const refused = await runCommand(h, "context");
+    assert.equal(refused.result.type, "failed");
+    assert.equal(h.events.some((event) => event.type === "session.prompt_result" && event.clientMessageId === "steered-command"), false);
+    assert.equal(h.natives[0].interruptCalls, 0);
+    assert.equal(h.steerCalls.length, 0);
+    gate.resolve();
+    await h.waitFor("session.turn", (event) => event.state === "completed");
+  } finally { gate.resolve(); await h.cleanup(); }
+});
+
+test("context and limits complete without model work and limits receives the session environment", async () => {
+  let env: Readonly<Record<string, string>> | undefined;
+  const h = await setup(successful, { limits: async (value) => { env = value; return "Factory: 80% remaining"; } });
+  try {
+    h.config.env = { FACTORY_HOME_OVERRIDE: "/isolated/factory", FACTORY_API_KEY: "synthetic-key" };
+    await h.open();
+    for (const name of ["context", "limits"]) assert.equal((await runCommand(h, name, "", name)).result.type, "completed");
+    assert.deepEqual(env, h.config.env);
+    assert.equal(h.natives[0].streamCalls, 0);
+    assert.equal(h.events.filter((event) => event.type === "session.turn").length, 0);
+    const context = await h.waitFor("timeline.item", (event) => event.item.type === "assistant_message" && event.item.id === "paseo:command:context");
+    assert.match(context.item.type === "assistant_message" ? context.item.text : "", /Used: 1,000 \/ 128,000/);
+    const completedIndex = h.events.findIndex((event) => event.type === "session.prompt_result" && event.clientMessageId === "limits");
+    assert.ok(h.events.slice(0, completedIndex).findLast((event) => event.type === "session.persistence"));
+  } finally { await h.cleanup(); }
+});
+
+test("unknown commands and invalid builtin arguments fail before running a model", async () => {
+  const h = await setup();
+  try {
+    await h.open();
+    assert.equal((await runCommand(h, "missing")).result.type, "failed");
+    assert.equal((await runCommand(h, "context", "unexpected")).result.type, "failed");
+    assert.equal(h.natives[0].streamCalls, 0);
+    await h.sendPrompt("path-text", [{ type: "text", text: "/tmp/file" }]);
+    await h.waitFor("session.turn", (event) => event.state === "completed");
+    assert.equal(h.natives[0].streamInputs[0].text, "/tmp/file");
+  } finally { await h.cleanup(); }
+});
+
+test("compact replaces the native handle, rebinds events and saves a fresh reference before completion", async () => {
+  const h = await setup();
+  try {
+    await h.open();
+    const initial = await h.waitFor("session.opened");
+    const oldSnapshot = await h.snapshotStore.load(initial.persistence!);
+    const original = h.natives[0];
+    let successor: FakeNative | undefined;
+    original.compactHandler = async (native, params) => {
+      assert.equal(params?.customInstructions, "Keep the important decisions");
+      successor = new FakeNative(native.options, successful);
+      successor.id = randomUUID();
+      return { session: successor, removedCount: 4 };
+    };
+    const receipt = await runCommand(h, "compact", "Keep the important decisions", "compaction");
+    assert.equal(receipt.result.type, "completed");
+    const saved = h.events.findLast((event) => event.type === "session.persistence");
+    assert.ok(saved?.type === "session.persistence");
+    assert.equal((saved.persistence.data as { nativeSessionId: string }).nativeSessionId, successor!.id);
+    assert.notEqual((saved.persistence.data as { snapshotKey: string }).snapshotKey, (initial.persistence!.data as { snapshotKey: string }).snapshotKey);
+    assert.deepEqual(await h.snapshotStore.load(initial.persistence!), oldSnapshot);
+    assert.equal(original.notifications.size, 0);
+    assert.equal(successor!.notifications.size, 1);
+    assert.ok(h.events.indexOf(saved) < h.events.indexOf(receipt));
+    await h.prompt("after-compaction");
+    await h.waitFor("session.turn", (event) => event.state === "completed");
+    assert.equal(original.streamCalls, 0);
+    assert.equal(successor!.streamCalls, 1);
+    await h.connection.send({ type: "session.close", requestId: "close-compact", sessionId: "session" });
+    await h.waitFor("session.closed");
+    await h.open("compacted-resume", saved.persistence);
+    assert.equal(h.resumed[0], successor!.id);
+  } finally { await h.cleanup(); }
+});
+
+test("a rejected compact is recoverable, while an uncertain timeout invalidates the native session", async () => {
+  const h = await setup(successful, { compact: async () => { throw new Error("Nothing to compact"); } });
+  try {
+    await h.open();
+    assert.equal((await runCommand(h, "compact")).result.type, "failed");
+    assert.equal(h.natives[0].notifications.size, 1);
+    await h.prompt(); await h.waitFor("session.turn", (event) => event.state === "completed");
+  } finally { await h.cleanup(); }
+  const timedOut = await setup(successful, { compactionTimeoutMs: 5, compact: () => new Promise(() => {}) });
+  try {
+    await timedOut.open();
+    assert.equal((await runCommand(timedOut, "compact")).result.type, "failed");
+    await timedOut.waitFor("session.runtime_failed");
+    await timedOut.prompt("after-timeout");
+    const refused = await timedOut.waitFor("session.prompt_result", (event) => event.clientMessageId === "after-timeout");
+    assert.equal(refused.result.type, "failed");
+    assert.equal(timedOut.natives[0].streamCalls, 0);
+  } finally { await timedOut.cleanup(); }
+});
+
+test("a failed compact checkpoint cannot report completion or overwrite the prior session head", async () => {
+  const h = await setup();
+  try {
+    await h.open();
+    const initial = await h.waitFor("session.opened");
+    const before = await h.snapshotStore.load(initial.persistence!);
+    const save = h.snapshotStore.save.bind(h.snapshotStore);
+    h.snapshotStore.save = async () => { throw new Error("Synthetic disk full"); };
+    const receipt = await runCommand(h, "compact");
+    assert.equal(receipt.result.type, "failed");
+    assert.deepEqual(await h.snapshotStore.load(initial.persistence!), before);
+    assert.equal(h.events.some((event) => event.type === "session.runtime_failed"), false);
+    h.snapshotStore.save = save;
+    assert.equal((await runCommand(h, "context")).result.type, "completed");
+    const saved = h.events.findLast((event) => event.type === "session.persistence");
+    assert.ok(saved?.type === "session.persistence");
+    assert.notEqual((saved.persistence.data as { nativeSessionId: string }).nativeSessionId, nativeId);
+  } finally { await h.cleanup(); }
+});
+
+test("Stop cancels an in-flight compaction and requires reopening before further work", async () => {
+  const started = deferred<void>();
+  const h = await setup(successful, { compact: async () => { started.resolve(); return new Promise(() => {}); } });
+  try {
+    await h.open();
+    const receipt = runCommand(h, "compact", "", "stop-compaction");
+    await started.promise;
+    await h.connection.send({ type: "session.interrupt", requestId: "stop-compact", sessionId: "session" });
+    await h.waitFor("request.completed", (event) => event.requestId === "stop-compact");
+    assert.equal((await receipt).result.type, "failed");
+    await h.waitFor("session.runtime_failed");
+    assert.equal(h.natives[0].streamCalls, 0);
+  } finally { await h.cleanup(); }
+});
+
+test("closing a session cancels a pending read command without publishing a late successful result", async () => {
+  const started = deferred<void>();
+  const value = deferred<string>();
+  const h = await setup(successful, { limits: async () => { started.resolve(); return value.promise; } });
+  try {
+    await h.open();
+    const receipt = runCommand(h, "limits", "", "close-limits");
+    await started.promise;
+    await h.connection.send({ type: "session.close", requestId: "close-read", sessionId: "session" });
+    await h.waitFor("session.closed");
+    assert.equal((await receipt).result.type, "failed");
+    const after = h.events.length;
+    value.resolve("Late quota response");
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(h.events.slice(after).some((event) => event.type === "session.prompt_result" || event.type === "timeline.item"), false);
+  } finally { value.resolve("Stopped"); await h.cleanup(); }
+});
+
+test("same-ID compaction replaces its observer and nonpersistent sessions never write snapshots", async () => {
+  const h = await setup(successful, { compact: async (native) => ({ session: new FakeNative(native.options, successful), removedCount: 1 }) });
+  try {
+    h.config.persist = false;
+    h.snapshotStore.save = async () => { throw new Error("Nonpersistent sessions must not save"); };
+    await h.open();
+    assert.equal((await runCommand(h, "compact")).result.type, "completed");
+    assert.equal(h.natives[0].notifications.size, 0);
+    assert.equal(h.events.some((event) => event.type === "session.persistence"), false);
+    await h.prompt();
+    await h.waitFor("session.turn", (event) => event.state === "completed");
+    assert.equal(h.natives[0].streamCalls, 0);
+  } finally { await h.cleanup(); }
+});
+
+test("an idle permission card blocks commands until it is explicitly resolved", async () => {
+  const h = await setup();
+  try {
+    await h.open();
+    const permission = Promise.resolve(h.natives[0].options.permissionHandler(RequestPermissionRequestParamsSchema.parse({
+      toolUses: [{ toolUse: { type: "tool_use", id: "idle-execute", name: "Execute", input: { command: "echo synthetic" } },
+        confirmationType: "exec", details: { type: "exec", command: "echo", fullCommand: "echo synthetic" } }],
+      options: [{ label: "Once", value: ToolConfirmationOutcome.ProceedOnce }, { label: "Cancel", value: ToolConfirmationOutcome.Cancel }],
+    })));
+    const card = await h.waitFor("session.permission");
+    const receipt = await runCommand(h, "context");
+    assert.equal(receipt.result.type, "failed");
+    if (receipt.result.type === "failed") assert.match(receipt.result.error.message, /pending Droid permission/);
+    await h.connection.send({ type: "session.permission", sessionId: "session", permissionId: card.request.id, response: { behavior: "deny" } });
+    await permission;
+    assert.equal((await runCommand(h, "context")).result.type, "completed");
+  } finally { await h.cleanup(); }
+});
+
+test("a background wakeup during compact admission cancels only the command before its RPC starts", async () => {
+  let compactCalls = 0;
+  const h = await setup(successful, { compact: async () => { compactCalls++; throw new Error("Must not compact active background work"); } });
+  try {
+    await h.open();
+    const unlisten = h.connection.onEvent((event) => {
+      if (event.type === "timeline.item" && event.item.type === "user_message" && event.item.clientMessageId === "racing-compact")
+        backgroundStart(h.natives[0], "background-before-compact");
+    });
+    assert.equal((await runCommand(h, "compact", "", "racing-compact")).result.type, "failed");
+    unlisten();
+    await h.waitFor("session.turn", (event) => event.state === "started");
+    assert.equal(compactCalls, 0);
+    assert.equal(h.events.some((event) => event.type === "session.runtime_failed"), false);
+    backgroundComplete(h.natives[0], "background-before-compact");
+    await h.waitFor("session.turn", (event) => event.state === "completed");
+  } finally { await h.cleanup(); }
+});
+
+test("a quota read timeout releases command admission without closing the healthy session", async () => {
+  const h = await setup(successful, { commandTimeoutMs: 5, limits: () => new Promise(() => {}) });
+  try {
+    await h.open();
+    const receipt = await runCommand(h, "limits");
+    assert.equal(receipt.result.type, "failed");
+    assert.equal(h.events.some((event) => event.type === "session.runtime_failed"), false);
+    await h.prompt();
+    await h.waitFor("session.turn", (event) => event.state === "completed");
+  } finally { await h.cleanup(); }
+});
+
+test("an SDK compaction timeout also invalidates its uncertain session", async () => {
+  const h = await setup(successful, { compact: async () => { throw new DroidTimeoutError("Native request timed out"); } });
+  try {
+    await h.open();
+    assert.equal((await runCommand(h, "compact")).result.type, "failed");
+    await h.waitFor("session.runtime_failed");
+    assert.equal(h.natives[0].notifications.size, 0);
+  } finally { await h.cleanup(); }
+});
 
 test("each sequential new session sees current models and multipliers in the same directory", async () => {
   const h = await setup(successful, { catalog: async (call) => call === 1 ? [catalogModel(0.8)] : [catalogModel(1.2), catalogModel(0.04, "new-model")] });

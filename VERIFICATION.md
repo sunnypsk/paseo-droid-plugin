@@ -2,6 +2,19 @@
 
 Initial validation: 2026-10-17. Environment: macOS, local Desktop-managed Paseo 0.11.4, Droid 0.244.0, and Factory SDK 0.9.1. Later release checks are dated separately below.
 
+## 0.3.0 native slash commands (2026-10-26)
+
+- Adds composer command discovery, native custom-command/skill forwarding, and `/compact`, `/context`, `/limits` without changing the SDK versions or Paseo core.
+- Final `npm run typecheck`, all 197 automated tests, package dry-run contents, and `git diff --check` passed. Dependencies and the Paseo `>=0.11.4` requirement are unchanged.
+- Regression coverage includes command precedence and filtering, exact quoted/multiline arguments, version gating, read timeout recovery, pending approvals, rejected steering, Stop/close, background admission races, successor observers, changed-ID and same-ID compaction, nonpersistent sessions, failed checkpoints, and resume. The real SDK is also tested against the synthetic JSON-RPC peer.
+- An isolated Paseo 0.13.0 daemon used `.test-output/paseo-commands`, loopback port `18743`, and the synthetic Droid executable. Production plugin installation/configuration was not changed. Its real Web UI displayed the three builtins, a custom command, and a skill in autocomplete; composer execution showed context, an unavailable-quota response, and compaction completion.
+- The disposable host agent `85102886-d318-45b6-868f-f1ed360ca052` retained its compacted native ID and snapshot key across `paseo agent reload`. It then executed `/native-review "feature/a b" --literal` and `/native-skill run this`, with the synthetic peer reporting the unchanged input. These validate the host/SDK bridge, not Factory's model execution.
+- A separate real Droid 0.249.0 probe reported protocol `1.275.0` and 68-69 models across fresh queries. In a new isolated git workspace, the plugin discovered native Markdown and PowerShell commands and a project skill. `/context` returned GPT-6 Luna's live category breakdown and 250,000-token budget. The final native smoke test executed the Markdown command, harmless PowerShell command with a quoted argument, and skill, then compacted, closed, and reopened the session. A subsequent model turn recalled the exact unique Markdown marker from native context.
+- Windows quota previously read an expired `auth.v2.file` while Droid had a valid newer `auth.v2.keyring` login. The adapter now reads the exact Factory encryption-key entry through `CredReadW` and prefers that secure login. The existing login successfully returned live billing quota through `/limits`; no additional sign-in, credential refresh, or credential write was required. Tests cover stale-file precedence, explicit keyring opt-out, bounded hidden invocation, and sanitized errors.
+- A real Claude Opus 5.5 Script permission on protocol `1.275.0` passed the existing strict schema. The probe cancelled the permission before execution. Its sanitized fixture is checked in as `server/fixtures/droid-0.249-script-permission.json`; tests retain all review fields and validate native-protocol replies for explicit Once and Cancel. Only then was `1.275.0` added to the compatibility allowlist. Other unvalidated versions remain rejected.
+- Local evidence: `.test-output/slash-commands-tests.txt`, `.test-output/paseo-command-host-before.json`, `.test-output/paseo-command-host-after.json`, `.test-output/native-command-proof-Pzm2cn/native-smoke-evidence.json`, and `.test-output/native-command-proof-eEkXIJ/permission-evidence.json`. Raw test state stays Git ignored.
+- The test browser tab and daemon were closed after validation. Its known supervisor, worker, plugin, synthetic peers, and listening port were verified gone.
+
 ## Automated checks
 
 - `npm run typecheck` passed.

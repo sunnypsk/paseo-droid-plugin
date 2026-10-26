@@ -367,6 +367,8 @@ export class Permissions {
     return [...this.pending.values()].some((pending) => pending.kind === "tool");
   }
 
+  hasPending(): boolean { return this.pending.size > 0; }
+
   /** Let Droid continue from AskUser using the user's new instruction verbatim. */
   supersedeQuestions(text: string): number {
     this.assertOpen();

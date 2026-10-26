@@ -28,15 +28,17 @@ function fixture(env: Record<string, string> = { HOME: syntheticHome }, platform
   const requests: Array<{url: string; init?: RequestInit}> = [];
   const reads: string[] = [];
   const keychainRequests: boolean[] = [];
+  const keyringRequests: boolean[] = [];
   let response = () => new Response(JSON.stringify({ limits: { standard: { fiveHour: { usedPercent: 25, windowEnd: "2026-10-17T10:00:00Z" } } } }), { status: 200 });
   const source = createDroidUsageSource({
     env, home: () => resolve("/wrong-default"), platform, now: () => now,
     exists: async (path) => stores.has(path),
     readText: async (path) => { reads.push(path); if (!stores.has(path)) throw new Error("private-file-error"); return stores.get(path)!; },
     keychainKey: async (development) => { keychainRequests.push(development); return key.toString("base64"); },
+    keyringKey: async (development) => { keyringRequests.push(development); return key.toString("base64"); },
     fetch: async (input, init) => { requests.push({ url: String(input), init }); return response(); },
   });
-  return { source, stores, requests, reads, keychainRequests, response: (next: typeof response) => { response = next; } };
+  return { source, stores, requests, reads, keychainRequests, keyringRequests, response: (next: typeof response) => { response = next; } };
 }
 
 test("Usage discovery scopes the session login to its launch home and ignores other providers/API-key sessions", async () => {
@@ -72,6 +74,49 @@ test("Windows encrypted file login supports global and session quota without Key
   assert.equal(f.requests[0].url, "https://api.factory.ai/api/billing/limits");
   assert.deepEqual(f.keychainRequests, []);
   assert.deepEqual(new Set(f.reads), new Set([loginPath("auth.v2.file"), loginPath("auth.v2.key")]));
+});
+
+test("Windows quota prefers the current keyring login over an expired file-store login", async () => {
+  const f = fixture({ HOME: syntheticHome }, "win32");
+  f.stores.clear();
+  const current = token("current-windows-login");
+  f.stores.set(loginPath("auth.v2.keyring"), encrypted(current));
+  f.stores.set(loginPath("auth.v2.file"), encrypted(token("old-login", now / 1000 - 3600)));
+  f.stores.set(loginPath("auth.v2.key"), key.toString("base64"));
+  const [account] = await f.source.discover({ kind: "session", provider: "droid-native", env: { HOME: syntheticHome } });
+  const report = await f.source.fetch(account.input);
+  assert.equal(report.status, "available");
+  assert.equal((f.requests[0].init?.headers as Record<string, string>).Authorization, `Bearer ${current}`);
+  assert.deepEqual(f.keychainRequests, []);
+  assert.deepEqual(f.keyringRequests, [false, false]);
+  assert.equal(f.reads.includes(loginPath("auth.v2.file")), false);
+  assert.equal(JSON.stringify(report).includes(current), false);
+  assert.equal(JSON.stringify(f.requests).includes("NEVER_TRANSMIT_REFRESH"), false);
+});
+
+test("explicit keyring opt-out retains native file-store behavior on Windows", async () => {
+  const f = fixture({ HOME: syntheticHome, FACTORY_DISABLE_KEYRING: "1" }, "win32");
+  f.stores.clear();
+  f.stores.set(loginPath("auth.v2.keyring"), encrypted(token("other-login")));
+  f.stores.set(loginPath("auth.v2.file"), encrypted());
+  f.stores.set(loginPath("auth.v2.key"), key.toString("base64"));
+  const [account] = await f.source.discover({ kind: "global" });
+  assert.equal((await f.source.fetch(account.input)).status, "available");
+  assert.deepEqual(f.keyringRequests, []);
+  assert.equal(f.reads.includes(loginPath("auth.v2.keyring")), false);
+});
+
+test("an unreadable Windows secure store reports access failure instead of claiming sign-in expired", async () => {
+  const source = createDroidUsageSource({ platform: "win32", env: { HOME: syntheticHome },
+    exists: async (path) => path === loginPath("auth.v2.keyring"), readText: async () => encrypted(),
+    keyringKey: async () => { throw new Error("private-keyring-error"); },
+    fetch: async () => { throw new Error("No credential means no network request"); },
+  });
+  const [account] = await source.discover({ kind: "global" });
+  const report = await source.fetch(account.input);
+  assert.equal(report.status, "error");
+  assert(!JSON.stringify(report).includes("private-keyring-error"));
+  assert(!JSON.stringify(report).includes("Sign in"));
 });
 
 test("fetch re-reads a rotated token without changing account identity or returning credentials", async () => {
